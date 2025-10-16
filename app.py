@@ -1,559 +1,573 @@
+"""
+SAWGraph PFAS Upstream Tracing Analysis - Streamlit App
+This app analyzes PFAS contamination data and traces upstream facilities
+"""
+
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
 import geopandas as gpd
 import pandas as pd
 from shapely import wkt
-from SPARQLWrapper import SPARQLWrapper, JSON, GET, DIGEST
-import warnings
-import time
-from datetime import datetime
-warnings.filterwarnings('ignore')
+from SPARQLWrapper import SPARQLWrapper2, JSON, GET, POST, DIGEST
+import rdflib
+from branca.element import Figure
 
 # Page configuration
 st.set_page_config(
-    page_title="SAWGraph Spatial Query Demo - Debug Version",
-    page_icon="🗺️",
+    page_title="SAWGraph PFAS Analysis",
+    page_icon="💧",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # Title and description
-st.title("🗺️ SAWGraph Spatial Query Demo - Debug Version")
-st.markdown("With detailed execution logging")
+st.title("🌊 SAWGraph PFAS Upstream Tracing Analysis")
+st.markdown("""
+This application analyzes PFAS contamination in water samples and identifies upstream facilities 
+that may be potential sources of contamination.
+""")
 
-# Initialize session state
-if 'query_results' not in st.session_state:
-    st.session_state.query_results = {}
-if 'debug_log' not in st.session_state:
-    st.session_state.debug_log = []
+# Helper functions
+def convertToDataframe(_results):
+    """Convert SPARQL results to pandas DataFrame"""
+    d = []
+    for x in _results.bindings:
+        row = {}
+        for k in x:
+            v = x[k]
+            vv = rdflib.term.Literal(v.value, datatype=v.datatype).toPython()
+            row[k] = vv
+        d.append(row)
+    df = pd.DataFrame(d)
+    return df
 
-# Debug log display area
-debug_container = st.expander("🐛 Debug Log", expanded=True)
+def convertS2ListToQueryString(s2list):
+    """Convert S2 cell list to query string format"""
+    s2list_short = [s2cell.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/","kwgr:") for s2cell in s2list]
+    s2_values_string = " ".join(s2list_short)
+    return s2_values_string
 
-def log_debug(message, level="INFO"):
-    """Add message to debug log with timestamp"""
-    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    log_entry = f"[{timestamp}] {level}: {message}"
-    st.session_state.debug_log.append(log_entry)
-    # Update the debug display
-    with debug_container:
-        st.text(log_entry)
-    print(log_entry)  # Also print to console
+# Sidebar for parameters
+st.sidebar.header("🔧 Analysis Parameters")
 
-# SPARQL endpoint configuration
-@st.cache_resource
-def setup_sparql_endpoint():
-    """Setup SPARQL endpoint with authentication"""
-    log_debug("Setting up SPARQL endpoint connection...")
-    endpoint = 'https://gdb.acg.maine.edu:7201/repositories/PFAS'
-    sparql = SPARQLWrapper(endpoint)
-    sparql.setHTTPAuth(DIGEST)
-    sparql.setCredentials('sawgraph-endpoint', 'skailab')
-    sparql.setMethod(GET)
-    sparql.setReturnFormat(JSON)
-    sparql.setTimeout(100030)
-    log_debug("SPARQL endpoint configured successfully")
-    return sparql
+# Add a test query button
+if st.sidebar.button("🧪 Test Connection & Show Available Data"):
+    with st.spinner("Testing SPARQL endpoints..."):
+        try:
+            # Test query to see what substances and material types have data
+            test_query = '''
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX me_egad: <http://sawgraph.spatialai.org/v1/me-egad#>
 
-def execute_query(query_string, query_name="Query"):
-    """Execute SPARQL query and return results with detailed logging"""
-    log_debug(f"Starting execution of {query_name}")
-    log_debug(f"Query length: {len(query_string)} characters")
-    
-    # Show first 500 chars of query for debugging
-    log_debug(f"Query preview: {query_string[:500]}...")
-    
-    sparql = setup_sparql_endpoint()
-    sparql.setQuery(query_string)
-    
-    try:
-        # Time the query execution
-        start_time = time.time()
-        log_debug(f"Sending {query_name} to endpoint...")
-        
-        results = sparql.query()
-        
-        query_time = time.time() - start_time
-        log_debug(f"{query_name} executed in {query_time:.2f} seconds")
-        
-        # Convert results
-        log_debug(f"Converting {query_name} results to JSON...")
-        json_results = results.convert()
-        
-        # Check if we got results
-        if "results" in json_results and "bindings" in json_results["results"]:
-            num_results = len(json_results["results"]["bindings"])
-            log_debug(f"{query_name} returned {num_results} results")
+SELECT DISTINCT ?substance ?substanceLabel ?matType ?matTypeLabel (COUNT(?obs) as ?count) WHERE {
+    ?obs rdf:type coso:ContaminantObservation;
+         coso:ofSubstance ?substance;
+         coso:analyzedSample ?sample;
+         coso:hasResult ?result.
+    ?sample coso:sampleOfMaterialType ?matType.
+    ?substance rdfs:label ?substanceLabel.
+    ?matType rdfs:label ?matTypeLabel.
+    ?result coso:measurementValue ?value.
+    FILTER(?value > 0)
+} GROUP BY ?substance ?substanceLabel ?matType ?matTypeLabel
+ORDER BY DESC(?count)
+LIMIT 20
+'''
+            sparql_test = SPARQLWrapper2("https://frink.apps.renci.org/sawgraph/sparql")
+            sparql_test.setHTTPAuth(DIGEST)
+            sparql_test.setMethod(POST)
+            sparql_test.setReturnFormat(JSON)
+            sparql_test.setQuery(test_query)
             
-            # Convert to DataFrame
-            log_debug(f"Converting {query_name} to DataFrame...")
-            data = []
-            for binding in json_results["results"]["bindings"]:
-                row = {}
-                for var, value in binding.items():
-                    row[var] = value['value']
-                data.append(row)
+            test_result = sparql_test.query()
+            test_df = convertToDataframe(test_result)
             
-            df = pd.DataFrame(data)
-            log_debug(f"{query_name} DataFrame created with shape {df.shape}")
-            return df
-        else:
-            log_debug(f"WARNING: {query_name} returned no results", "WARNING")
-            return pd.DataFrame()
+            st.success("✅ Connection successful!")
+            st.write("**Available data combinations (top 20):**")
+            st.dataframe(test_df)
             
-    except Exception as e:
-        log_debug(f"ERROR in {query_name}: {str(e)}", "ERROR")
-        log_debug(f"Error type: {type(e).__name__}", "ERROR")
-        return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Connection test failed: {str(e)}")
 
-# Define all options
-INDUSTRY_OPTIONS = {
-    "Waste Treatment and Disposal": "naics:NAICS-5622",
-    "National Security": "naics:NAICS-92811", 
-    "Sewage Treatment Facilities": "naics:NAICS-22132",
-    "Water Supply and Irrigation": "naics:NAICS-22131",
-    "Paper Product Manufacturing": "naics:NAICS-3222",
-    "Plastics Product Manufacturing": "naics:NAICS-3261",
-    "Textile Finishing and Coating": "naics:NAICS-3133",
-    "Basic Chemical Manufacturing": "naics:NAICS-3251"
+st.sidebar.markdown("---")
+
+# Substance selection
+substances = ["PFOS", "PFOA", "PFBA", "PFBEA", "PFBS", "PFHPA", "PFHXS", "PFHXA", "PFHPS", "PFNA", "PFDA"]
+substance = st.sidebar.selectbox(
+    "Select PFAS Substance",
+    substances,
+    index=substances.index("PFHPA")
+)
+substanceCode = "me_egad:parameter." + substance + "_A"
+
+# Material type selection
+material_types = {
+    "DW (Drinking Water)": "DW",
+    "GW (Groundwater)": "GW",
+    "WW (Waste Water)": "WW",
+    "SW (Surface Water)": "SW",
+    "PW (Pore Water)": "PW",
+    "L (Leachate)": "L",
+    "SR (Storm Water Runoff)": "SR",
+    "SL (Soil)": "SL"
 }
+materialType = st.sidebar.selectbox(
+    "Select Sample Material Type",
+    list(material_types.keys()),
+    index=1
+)
+matTypeCode = "me_egad_data:sampleMaterialType." + material_types[materialType]
 
-SAMPLE_TYPE_OPTIONS = {
-    "Groundwater": "me_egad_data:sampleMaterialTypeQualifier.GW",
-    "Surface Water": "me_egad_data:sampleMaterialTypeQualifier.SW",
-    "Soil": "me_egad_data:sampleMaterialTypeQualifier.SL",
-    "Sediment": "me_egad_data:sampleMaterialTypeQualifier.SD",
-    "Vegetation": "me_egad_data:sampleMaterialTypeQualifier.V",
-    "Leachate": "me_egad_data:sampleMaterialTypeQualifier.L",
-    "Waste Water": "me_egad_data:sampleMaterialTypeQualifier.WW",
-    "Sludge": "me_egad_data:sampleMaterialTypeQualifier.SU",
-    "Process Water": "me_egad_data:sampleMaterialTypeQualifier.PW",
-    "Stormwater Runoff": "me_egad_data:sampleMaterialTypeQualifier.SR",
-    "Whole Fish": "me_egad_data:sampleMaterialTypeQualifier.WH",
-    "Skinless Fish Fillet": "me_egad_data:sampleMaterialTypeQualifier.SF",
-    "Liver": "me_egad_data:sampleMaterialTypeQualifier.LV"
+# Administrative region selection
+regions = {
+    "23 (Maine)": "23",
+    "23019 (Penobscot County, Maine)": "23019", 
+    "23011 (Kennebec County, Maine)": "23011",
+    "23005 (Cumberland County, Maine)": "23005",
+    "33 (New Hampshire)": "33",
+    "17 (Illinois)": "17"
 }
+admin_region = st.sidebar.selectbox(
+    "Select Administrative Region",
+    list(regions.keys()),
+    index=3  # Default to Cumberland County
+)
+regionCode = regions[admin_region]
 
-SUBSTANCE_OPTIONS = {
-    "PFOS": "me_egad_data:parameter.PFOS_A",
-    "PFOA": "me_egad_data:parameter.PFOA_A",
-    "PFBA": "me_egad_data:parameter.PFBA_A",
-    "PFBEA": "me_egad_data:parameter.PFBEA_A",
-    "PFBS": "me_egad_data:parameter.PFBS_A",
-    "PFHPA": "me_egad_data:parameter.PFHPA_A",
-    "PFHXS": "me_egad_data:parameter.PFHXS_A",
-    "PFHXA": "me_egad_data:parameter.PFHXA_A",
-    "PFHPS": "me_egad_data:parameter.PFHPS_A",
-    "PFNA": "me_egad_data:parameter.PFNA_A",
-    "PFDA": "me_egad_data:parameter.PFDA_A"
-}
+# Concentration range
+st.sidebar.subheader("Concentration Range (ng/L)")
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    minValue = st.number_input("Min", value=20, min_value=0, step=5)
+with col2:
+    maxValue = st.number_input("Max", value=30, min_value=0, step=5)
 
-COUNTY_OPTIONS = {
-    "Knox County": "kwgr:administrativeRegion.USA.23013",
-    "Penobscot County": "kwgr:administrativeRegion.USA.23019",
-    "All Maine": None
-}
-
-# Sidebar with all filters
-with st.sidebar:
-    st.header("🔍 Query Filters")
-    
-    # Clear debug log button
-    if st.button("Clear Debug Log"):
-        st.session_state.debug_log = []
-        log_debug("Debug log cleared")
-    
-    # Administrative Region
-    st.subheader("📍 Administrative Region")
-    selected_county = st.selectbox(
-        "Select County",
-        options=list(COUNTY_OPTIONS.keys()),
-        index=2,  # Default to "All Maine"
-        help="Filter by county or search all of Maine"
-    )
-    
-    # Industry Selection
-    st.subheader("🏭 Facility Type")
-    selected_industries = st.multiselect(
-        "Select Industries",
-        options=list(INDUSTRY_OPTIONS.keys()),
-        default=["Waste Treatment and Disposal", "National Security"],
-        help="Select one or more industry types"
-    )
-    
-    # Sample Type
-    st.subheader("🧪 Sample Type")
-    selected_sample_types = st.multiselect(
-        "Select Sample Types",
-        options=list(SAMPLE_TYPE_OPTIONS.keys()),
-        default=["Groundwater", "Surface Water"],
-        help="Filter by sample material type"
-    )
-    
-    # Chemical/Substance
-    st.subheader("⚗️ Chemical Substances")
-    selected_substances = st.multiselect(
-        "Select Substances",
-        options=list(SUBSTANCE_OPTIONS.keys()),
-        default=["PFOS", "PFOA"],
-        help="Filter by specific PFAS chemicals"
-    )
-    
-    # Concentration Range
-    st.subheader("📊 Concentration Range")
-    col1, col2 = st.columns(2)
-    with col1:
-        min_concentration = st.number_input(
-            "Min (ng/L)",
-            min_value=0.0,
-            value=4.0,
-            step=0.1
-        )
-    with col2:
-        max_concentration = st.number_input(
-            "Max (ng/L)",
-            min_value=0.0,
-            value=1000.0,
-            step=1.0
-        )
-    
-    # Performance Options
-    st.markdown("---")
-    st.subheader("⚡ Performance")
-    result_limit = st.slider(
-        "Result Limit",
-        min_value=5,
-        max_value=100,
-        value=25,
-        step=5,
-        help="Limit results for faster queries"
-    )
-
-# Query builders
-def build_filtered_samples_query(
-    industries, sample_types, substances, min_conc, max_conc, county, limit=25
-):
-    """Build query with all filters applied"""
-    log_debug("Building filtered samples query...")
-    
-    # Log the filters being applied
-    log_debug(f"Industries: {industries}")
-    log_debug(f"Sample types: {sample_types}")
-    log_debug(f"Substances: {substances}")
-    log_debug(f"Concentration range: {min_conc} - {max_conc}")
-    log_debug(f"County: {county}")
-    log_debug(f"Limit: {limit}")
-    
-    # Build VALUES clauses
-    industry_values = " ".join([INDUSTRY_OPTIONS[ind] for ind in industries]) if industries else ""
-    sample_type_values = " ".join([f"<{SAMPLE_TYPE_OPTIONS[st]}>" for st in sample_types]) if sample_types else ""
-    substance_values = " ".join([f"<{SUBSTANCE_OPTIONS[sub]}>" for sub in substances]) if substances else ""
-    
-    log_debug(f"Industry VALUES: {industry_values}")
-    log_debug(f"Sample type VALUES: {sample_type_values}")
-    log_debug(f"Substance VALUES: {substance_values}")
-    
-    # County filter
-    county_filter = ""
-    if county != "All Maine" and COUNTY_OPTIONS[county]:
-        county_filter = f"""
-        # County filter
-        SERVICE <repository:Spatial> {{
-            ?countySub rdf:type kwg-ont:AdministrativeRegion_3;
-                       kwg-ont:administrativePartOf <{COUNTY_OPTIONS[county]}>.
-        }}
-        ?samplePoint kwg-ont:sfWithin ?countySub.
-        """
-        log_debug(f"County filter applied for: {county}")
-    
-    query = f"""
-PREFIX dcterms: <http://purl.org/dc/terms/>
-PREFIX qudt: <http://qudt.org/schema/qudt/>
+# Run analysis button
+if st.sidebar.button("🔍 Run Analysis", type="primary"):
+    with st.spinner("Executing SPARQL queries and processing data..."):
+        
+        # Progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Debug information
+        with st.expander("🐛 Debug Information (click to expand)"):
+            st.write("**Selected Parameters:**")
+            st.write(f"- Substance: {substance} → Code: {substanceCode}")
+            st.write(f"- Material Type: {materialType} → Code: {matTypeCode}")
+            st.write(f"- Region: {admin_region} → Code: {regionCode}")
+            st.write(f"- Concentration Range: {minValue} - {maxValue} ng/L")
+        
+        try:
+            # Query 1: Get sample points
+            status_text.text("Querying sample points...")
+            progress_bar.progress(10)
+            
+            q1 = f'''
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX me_egad: <http://sawgraph.spatialai.org/v1/me-egad#>
+PREFIX me_egad_data: <http://sawgraph.spatialai.org/v1/me-egad-data#>
+
+SELECT (COUNT(DISTINCT ?subVal) as ?resultCount) (MAX(?result_value) as ?max) ?sp ?spWKT  WHERE {{
+    ?sp rdf:type coso:SamplePoint ;
+        geo:hasGeometry/geo:asWKT ?spWKT.
+    ?observation rdf:type coso:ContaminantObservation;
+        coso:observedAtSamplePoint ?sp;
+        coso:ofSubstance ?substance ;
+        coso:analyzedSample ?sample ;
+        coso:hasResult ?result .
+    ?sample rdfs:label ?sampleLabel;
+        coso:sampleOfMaterialType ?matType.
+    ?matType rdfs:label ?matTypeLabel.
+    ?result coso:measurementValue ?result_value;
+        coso:measurementUnit ?unit .
+    VALUES ?unit {{<http://qudt.org/vocab/unit/NanoGM-PER-L>}}.
+    VALUES ?substance {{{substanceCode}}}
+    VALUES ?matType {{{matTypeCode}}}
+    FILTER (?result_value >= {minValue}).
+    FILTER (?result_value <= {maxValue}).
+    ?unit qudt:symbol ?unit_sym.
+    BIND((CONCAT(str(?result_value) , " ", ?unit_sym)) as ?subVal)
+}} GROUP BY ?sp ?spWKT
+'''
+            
+            sparqlGET = SPARQLWrapper2("https://frink.apps.renci.org/sawgraph/sparql")
+            sparqlGET.setHTTPAuth(DIGEST)
+            sparqlGET.setMethod(POST)
+            sparqlGET.setReturnFormat(JSON)
+            
+            sparqlGET.setQuery(q1)
+            samplepoint_result = sparqlGET.query()
+            samplepoints = convertToDataframe(samplepoint_result)
+            
+            # Debug output
+            with st.expander("Query 1 Results"):
+                st.write(f"Sample points found: {len(samplepoints)}")
+                if not samplepoints.empty:
+                    st.write("Columns:", list(samplepoints.columns))
+                    st.write("First few rows:", samplepoints.head())
+            
+            if samplepoints.empty:
+                st.warning("No sample points found with the specified criteria.")
+                st.info("Try adjusting:")
+                st.info("• The concentration range (current: " + str(minValue) + "-" + str(maxValue) + " ng/L)")
+                st.info("• The PFAS substance (current: " + substance + ")")
+                st.info("• The material type (current: " + materialType + ")")
+                
+                # Show what the query was looking for
+                with st.expander("🔍 What was searched"):
+                    st.code(f"""
+Searching for:
+- Substance: {substanceCode}
+- Material Type: {matTypeCode}
+- Concentration: {minValue} < value < {maxValue} ng/L
+- Unit: NanoGM-PER-L
+                    """)
+                st.stop()
+            
+            # Query 2: Get S2 cells
+            status_text.text("Querying S2 cells...")
+            progress_bar.progress(25)
+            
+            q2 = f'''
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX me_egad: <http://sawgraph.spatialai.org/v1/me-egad#>
+PREFIX me_egad_data: <http://sawgraph.spatialai.org/v1/me-egad-data#>
+
+SELECT DISTINCT ?s2cell WHERE {{
+    ?sp rdf:type coso:SamplePoint;
+        spatial:connectedTo ?s2cell .
+    ?s2cell rdf:type kwg-ont:S2Cell_Level13 .
+    ?observation rdf:type coso:ContaminantObservation;
+        coso:observedAtSamplePoint ?sp;
+        coso:ofSubstance ?substance ;
+        coso:analyzedSample ?sample ;
+        coso:hasResult ?result .
+    ?sample coso:sampleOfMaterialType ?matType.
+    ?matType rdfs:label ?matTypeLabel.
+    ?result coso:measurementValue ?result_value;
+        coso:measurementUnit ?unit .
+    VALUES ?unit {{<http://qudt.org/vocab/unit/NanoGM-PER-L>}}.
+    VALUES ?substance {{{substanceCode}}}
+    VALUES ?matType {{{matTypeCode}}}
+    FILTER (?result_value >= {minValue}).
+    FILTER (?result_value <= {maxValue}).
+}} GROUP BY ?s2cell
+'''
+            
+            sparqlGET.setQuery(q2)
+            s2_result = sparqlGET.query()
+            s2cells = convertToDataframe(s2_result)
+            
+            if s2cells.empty or 's2cell' not in s2cells.columns:
+                st.warning("No S2 cells found matching the criteria. This could mean:")
+                st.info("• No samples found with the specified PFAS substance and concentration range")
+                st.info("• The material type may not have samples in this range")
+                st.info("• Try adjusting the concentration range or selecting different parameters")
+                st.stop()
+            
+            s2_values_string = convertS2ListToQueryString(s2cells['s2cell'].tolist())
+            
+            # Query 3: Filter S2 cells by admin region
+            status_text.text("Filtering by administrative region...")
+            progress_bar.progress(40)
+            
+            q3 = f'''
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+
+SELECT ?s2cell WHERE {{
+    ?s2neighbor spatial:connectedTo kwgr:administrativeRegion.USA.{regionCode} .
+    VALUES ?s2neighbor {{{s2_values_string}}}
+    ?s2neighbor kwg-ont:sfTouches | owl:sameAs ?s2cell.
+}}'''
+            
+            # Query counties
+            q_counties = f'''
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+
+SELECT * WHERE {{
+    VALUES ?county {{kwgr:administrativeRegion.USA.{regionCode}}}
+    ?county geo:hasGeometry/geo:asWKT ?countyWKT;
+            rdfs:label ?countyName.
+}}'''
+            
+            sparqlGET_spatial = SPARQLWrapper2("https://frink.apps.renci.org/spatialkg/sparql")
+            sparqlGET_spatial.setHTTPAuth(DIGEST)
+            sparqlGET_spatial.setMethod(POST)
+            sparqlGET_spatial.setReturnFormat(JSON)
+            
+            sparqlGET_spatial.setQuery(q3)
+            s2_filtered_result = sparqlGET_spatial.query()
+            s2_filtered = convertToDataframe(s2_filtered_result)
+            
+            sparqlGET_spatial.setQuery(q_counties)
+            counties_result = sparqlGET_spatial.query()
+            counties = convertToDataframe(counties_result)
+            
+            if len(s2_filtered) == 0:
+                st.warning("No S2 cells found in the selected region.")
+                st.stop()
+            
+            s2_filtered_values_string = convertS2ListToQueryString(s2_filtered['s2cell'].tolist())
+            
+            # Query 4: Get upstream S2 cells from hydrology
+            status_text.text("Analyzing upstream hydrology...")
+            progress_bar.progress(60)
+            
+            q4 = f'''
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX hyf: <https://www.opengis.net/def/schema/hy_features/hyf/>
+PREFIX nhdplusv2: <http://nhdplusv2.spatialai.org/v1/nhdplusv2#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT DISTINCT ?s2cell WHERE {{
+    ?downstream_flowline rdf:type hyf:HY_FlowPath ;
+                        spatial:connectedTo ?s2cellds .
+    ?upstream_flowline hyf:downstreamFlowPathTC ?downstream_flowline .
+    VALUES ?s2cellds {{{s2_filtered_values_string}}}
+    ?s2cell spatial:connectedTo ?upstream_flowline ;
+            rdf:type kwg-ont:S2Cell_Level13 .
+}}'''
+            
+            sparqlGET_hydro = SPARQLWrapper2("https://frink.apps.renci.org/hydrologykg/sparql")
+            sparqlGET_hydro.setHTTPAuth(DIGEST)
+            sparqlGET_hydro.setMethod(POST)
+            sparqlGET_hydro.setReturnFormat(JSON)
+            
+            sparqlGET_hydro.setQuery(q4)
+            hydrology_result = sparqlGET_hydro.query()
+            hydrology = convertToDataframe(hydrology_result)
+            
+            if hydrology.empty or 's2cell' not in hydrology.columns:
+                st.warning("No upstream S2 cells found in the hydrology network.")
+                st.info("Using the original S2 cells for facility search...")
+                s2_upstream_values_string = s2_filtered_values_string
+            else:
+                s2_upstream_values_string = convertS2ListToQueryString(hydrology['s2cell'].tolist())
+            
+            # Query 5: Get facilities
+            status_text.text("Identifying upstream facilities...")
+            progress_bar.progress(80)
+            
+            q5 = f'''
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX naics: <http://w3id.org/fio/v1/naics#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
 PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
 PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
 PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX fio: <http://w3id.org/fio/v1/fio#>
-PREFIX me_egad_data: <http://sawgraph.spatialai.org/v1/me-egad-data#>
 
-SELECT DISTINCT ?samplePoint ?spWKT ?sampleId ?substance_label ?result ?unit ?type_label
-WHERE {{
-    # Find facilities
-    SERVICE <repository:FIO> {{
-        ?facility fio:ofIndustry ?industry.
-        {f"VALUES ?industry {{ {industry_values} }}" if industry_values else ""}
-    }}
-    
-    # Find S2 cells containing facilities
-    SERVICE <repository:Spatial> {{
-        ?s2 kwg-ont:sfContains ?facility;
-            rdf:type kwg-ont:S2Cell_Level13.
-    }}
-    
-    # Find sample points in those S2 cells
-    ?samplePoint kwg-ont:sfWithin ?s2;
-                 rdf:type coso:SamplePoint;
-                 geo:hasGeometry/geo:asWKT ?spWKT.
-    
-    {county_filter}
-    
-    # Get sample details
-    ?sample coso:fromSamplePoint ?samplePoint;
-            dcterms:identifier ?sampleId;
-            coso:sampleOfMaterialType ?type.
-    ?type rdfs:label ?type_label.
-    {f"VALUES ?type {{ {sample_type_values} }}" if sample_type_values else ""}
-    
-    # Get observations
-    ?observation rdf:type coso:ContaminantObservation;
-                 coso:observedAtSamplePoint ?samplePoint;
-                 coso:ofSubstance ?substance;
-                 coso:hasResult/coso:measurementValue ?result;
-                 coso:hasResult/coso:measurementUnit/qudt:symbol ?unit.
-    ?substance skos:altLabel ?substance_label.
-    {f"VALUES ?substance {{ {substance_values} }}" if substance_values else ""}
-    
-    # Concentration filter
-    FILTER(?result >= {min_conc} && ?result <= {max_conc})
-}}
-LIMIT {limit}
-"""
-    log_debug("Filtered samples query built successfully")
-    return query
-
-def build_facilities_query(industries, county, limit=100):
-    """Build facilities query with filters"""
-    log_debug("Building facilities query...")
-    log_debug(f"Industries for facilities: {industries}")
-    log_debug(f"County for facilities: {county}")
-    
-    industry_values = " ".join([INDUSTRY_OPTIONS[ind] for ind in industries]) if industries else ""
-    
-    # County filter for facilities
-    county_filter = ""
-    if county != "All Maine" and COUNTY_OPTIONS[county]:
-        county_filter = f"""
-        SERVICE <repository:Spatial> {{
-            ?s2 kwg-ont:sfContains ?facility;
-                rdf:type kwg-ont:S2Cell_Level13.
-            ?countySub rdf:type kwg-ont:AdministrativeRegion_3;
-                       kwg-ont:administrativePartOf <{COUNTY_OPTIONS[county]}>;
-                       kwg-ont:sfOverlaps ?s2.
-        }}
-        """
-        log_debug(f"Facilities county filter applied")
-    
-    query = f"""
-PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX naics: <http://w3id.org/fio/v1/naics#>
-PREFIX fio: <http://w3id.org/fio/v1/fio#>
-PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
-PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-
-SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryName WHERE {{
-    SERVICE <repository:FIO> {{
-        ?facility fio:ofIndustry ?industry;
-                  geo:hasGeometry/geo:asWKT ?facWKT;
-                  rdfs:label ?facilityName.
-        ?industry rdfs:label ?industryName.
-        {f"VALUES ?industry {{ {industry_values} }}" if industry_values else ""}
-    }}
-    {county_filter}
-}}
-LIMIT {limit}
-"""
-    log_debug("Facilities query built successfully")
-    return query
-
-def build_county_query(county):
-    """Get county boundaries"""
-    log_debug(f"Building county query for: {county}")
-    
-    if county == "All Maine" or not COUNTY_OPTIONS[county]:
-        # Return all Maine counties
-        log_debug("Building query for all Maine counties")
-        return """
-PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
-PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-
-SELECT ?county ?countyWKT ?countyName WHERE {
-    SERVICE <repository:Spatial> {
-        ?county rdf:type kwg-ont:AdministrativeRegion_2;
-                kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.ME;
-                geo:hasGeometry/geo:asWKT ?countyWKT;
-                rdfs:label ?countyName.
-    }
-} LIMIT 20
-"""
-    else:
-        log_debug(f"Building query for specific county: {county}")
-        return f"""
-PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
-
-SELECT ?county ?countyWKT ?countyName WHERE {{
-    SERVICE <repository:Spatial> {{
-        VALUES ?county {{<{COUNTY_OPTIONS[county]}>}}
-        ?county geo:hasGeometry/geo:asWKT ?countyWKT;
-                rdfs:label ?countyName.
-    }}
-}}
-"""
-
-# Main execution
-if st.button("🚀 Execute Query", type="primary", use_container_width=True):
-    if not selected_industries:
-        st.error("Please select at least one industry type")
-        log_debug("ERROR: No industries selected", "ERROR")
-    else:
-        # Clear previous debug log for this execution
-        st.session_state.debug_log = []
-        log_debug("="*50)
-        log_debug("STARTING NEW QUERY EXECUTION")
-        log_debug("="*50)
-        
-        with st.spinner("Executing queries..."):
-            try:
-                overall_start = time.time()
-                progress_bar = st.progress(0)
-                status = st.empty()
-                
-                results = {}
-                
-                # Query 1: Filtered samples
-                status.text("Building filtered samples query...")
-                log_debug("QUERY 1: Filtered Samples")
-                log_debug("-"*30)
-                progress_bar.progress(10)
-                
-                samples_query = build_filtered_samples_query(
-                    selected_industries,
-                    selected_sample_types,
-                    selected_substances,
-                    min_concentration,
-                    max_concentration,
-                    selected_county,
-                    result_limit
+SELECT DISTINCT ?facility ?facWKT ?facilityName ?industry ?industryName ?industryGroup 
+                ?industryGroupName ?industrySubsector ?industrySubsectorName WHERE {{
+    ?s2cell kwg-ont:sfContains ?facility.
+    VALUES ?s2cell {{{s2_upstream_values_string}}}
+    ?facility fio:ofIndustry ?industryCode, ?industryGroup, ?industrySubsector ;
+            geo:hasGeometry/geo:asWKT ?facWKT;
+            rdfs:label ?facilityName.
+    ?industryCode a naics:NAICS-IndustryCode;
+        rdfs:label ?industryName ;
+        fio:subcodeOf ?industryGroup .
+    ?industryGroup a naics:NAICS-IndustryGroup;
+        rdfs:label ?industryGroupName ;
+        fio:subcodeOf ?industrySubsector .
+    ?industrySubsector a naics:NAICS-IndustrySubsector;
+        rdfs:label ?industrySubsectorName;
+        fio:subcodeOf naics:NAICS-31 .
+}}'''
+            
+            sparqlGET_fio = SPARQLWrapper2("https://frink.apps.renci.org/fiokg/sparql")
+            sparqlGET_fio.setHTTPAuth(DIGEST)
+            sparqlGET_fio.setMethod(POST)
+            sparqlGET_fio.setReturnFormat(JSON)
+            
+            sparqlGET_fio.setQuery(q5)
+            facility_result = sparqlGET_fio.query()
+            facilities = convertToDataframe(facility_result)
+            
+            # Process spatial data
+            status_text.text("Processing spatial data...")
+            progress_bar.progress(90)
+            
+            # Convert to GeoDataFrames
+            if not samplepoints.empty and 'spWKT' in samplepoints.columns:
+                samplepoints['spWKT'] = samplepoints['spWKT'].apply(wkt.loads)
+                samplepoints = gpd.GeoDataFrame(samplepoints, geometry='spWKT')
+                samplepoints.set_crs(epsg=4326, inplace=True, allow_override=True)
+            
+            if not facilities.empty and 'facWKT' in facilities.columns:
+                facilities['facWKT'] = facilities['facWKT'].apply(wkt.loads)
+                facilities = gpd.GeoDataFrame(facilities, geometry='facWKT')
+                facilities.set_crs(epsg=4326, inplace=True, allow_override=True)
+            
+            if not counties.empty and 'countyWKT' in counties.columns:
+                counties['countyWKT'] = counties['countyWKT'].apply(wkt.loads)
+                counties = gpd.GeoDataFrame(counties, geometry='countyWKT')
+                counties.set_crs(epsg=4326, inplace=True, allow_override=True)
+            
+            # Create map
+            status_text.text("Creating interactive map...")
+            progress_bar.progress(95)
+            
+            # Initialize map with county boundaries
+            if not counties.empty and 'countyWKT' in counties.columns:
+                map_obj = counties.explore(name='Counties', style_kwds=dict(color='Gray', fill=0.0))
+            else:
+                map_obj = folium.Map(location=[45.0, -69.0], zoom_start=7)
+            
+            # Add sample points
+            if not samplepoints.empty and 'spWKT' in samplepoints.columns:
+                samplepoints.explore(
+                    m=map_obj,
+                    name='<span style="color:DarkOrange;">Samples</span>',
+                    color='DarkOrange',
+                    style_kwds=dict(style_function=lambda x: {
+                        "radius": float(x['properties']["max"])/20 if float(x['properties']["max"]) < 320 else 16,
+                        "opacity": 0.3,
+                        "color": 'DimGray',
+                    }),
+                    marker_kwds=dict(radius=6),
+                    marker_type='circle_marker',
+                    popup=["sp", "max", "resultCount"],
                 )
+            
+            # Add facilities by industry type
+            if not facilities.empty and 'industrySubsectorName' in facilities.columns:
+                colors = ['MidnightBlue','MediumBlue','SlateBlue','MediumSlateBlue', 
+                         'DodgerBlue','DeepSkyBlue','SkyBlue','CadetBlue','DarkCyan',
+                         'LightSeaGreen','MediumSageGreen','PaleVioletRed','Purple',
+                         'Orchid','Fuchsia','MediumVioletRed','HotPink','LightPink']
                 
-                status.text("Executing filtered samples query...")
-                progress_bar.progress(20)
-                samples_df = execute_query(samples_query, "Samples Query")
-                results['samples'] = samples_df
-                progress_bar.progress(35)
-                
-                # Query 2: Facilities
-                status.text("Building facilities query...")
-                log_debug("QUERY 2: Facilities")
-                log_debug("-"*30)
-                progress_bar.progress(40)
-                
-                facilities_query = build_facilities_query(
-                    selected_industries,
-                    selected_county,
-                    100
-                )
-                
-                status.text("Executing facilities query...")
-                progress_bar.progress(50)
-                facilities_df = execute_query(facilities_query, "Facilities Query")
-                results['facilities'] = facilities_df
-                progress_bar.progress(65)
-                
-                # Query 3: County boundaries (if needed)
-                if selected_county != "All Maine":
-                    status.text("Building county boundaries query...")
-                    log_debug("QUERY 3: County Boundaries")
-                    log_debug("-"*30)
-                    progress_bar.progress(70)
-                    
-                    county_query = build_county_query(selected_county)
-                    
-                    status.text("Executing county boundaries query...")
-                    progress_bar.progress(75)
-                    counties_df = execute_query(county_query, "Counties Query")
-                    results['counties'] = counties_df
-                    progress_bar.progress(90)
-                
-                progress_bar.progress(100)
-                status.empty()
-                progress_bar.empty()
-                
-                # Store results
-                st.session_state.query_results = results
-                
-                # Summary
-                total_time = time.time() - overall_start
-                total_samples = len(samples_df)
-                total_facilities = len(facilities_df)
-                
-                log_debug("="*50)
-                log_debug(f"EXECUTION COMPLETE in {total_time:.2f} seconds")
-                log_debug(f"Total samples: {total_samples}")
-                log_debug(f"Total facilities: {total_facilities}")
-                log_debug("="*50)
-                
-                st.success(f"✅ Query completed in {total_time:.1f}s! Found {total_samples} sample results and {total_facilities} facilities.")
-                
-                # Show applied filters
-                with st.expander("Applied Filters"):
-                    st.write(f"**County:** {selected_county}")
-                    st.write(f"**Industries:** {', '.join(selected_industries)}")
-                    st.write(f"**Sample Types:** {', '.join(selected_sample_types)}")
-                    st.write(f"**Substances:** {', '.join(selected_substances)}")
-                    st.write(f"**Concentration Range:** {min_concentration} - {max_concentration} ng/L")
-                
-            except Exception as e:
-                progress_bar.empty()
-                status.empty()
-                log_debug(f"FATAL ERROR: {str(e)}", "ERROR")
-                st.error(f"Error: {str(e)}")
-                st.info("Try reducing the result limit or selecting fewer filters")
+                c = 0
+                for industry in list(facilities.industrySubsectorName.unique()):
+                    facilities[facilities['industrySubsectorName'] == industry].explore(
+                        m=map_obj,
+                        name=f'<span style="color:{colors[c % len(colors)]};">{industry}</span>',
+                        color=colors[c % len(colors)],
+                        marker_kwds=dict(radius=6),
+                        popup=True
+                    )
+                    c += 1
+            
+            folium.LayerControl(collapsed=False).add_to(map_obj)
+            
+            progress_bar.progress(100)
+            status_text.text("Analysis complete!")
+            
+            # Display results
+            st.success("✅ Analysis completed successfully!")
+            
+            # Display statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Sample Points Found", len(samplepoints) if not samplepoints.empty else 0)
+            with col2:
+                st.metric("Upstream Facilities", len(facilities) if not facilities.empty else 0)
+            with col3:
+                if not facilities.empty and 'industrySubsectorName' in facilities.columns:
+                    st.metric("Industry Types", len(facilities['industrySubsectorName'].unique()))
+                else:
+                    st.metric("Industry Types", 0)
+            
+            # Display map
+            st.subheader("📍 Interactive Map")
+            st_folium(map_obj, width=None, height=600, returned_objects=[])
+            
+            # Display data tables
+            with st.expander("📊 Sample Points Data"):
+                if not samplepoints.empty:
+                    display_cols = [col for col in samplepoints.columns if col != 'spWKT']
+                    st.dataframe(samplepoints[display_cols])
+                else:
+                    st.info("No sample points found matching the criteria.")
+            
+            with st.expander("🏭 Facilities Data"):
+                if not facilities.empty:
+                    display_cols = [col for col in facilities.columns if col != 'facWKT']
+                    st.dataframe(facilities[display_cols])
+                else:
+                    st.info("No facilities found in the upstream areas.")
+            
+            # Export options
+            st.subheader("💾 Export Options")
+            col1, col2 = st.columns(2)
+            with col1:
+                if not samplepoints.empty:
+                    csv_samples = samplepoints.drop(columns=['spWKT']).to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Sample Points (CSV)",
+                        data=csv_samples,
+                        file_name=f"sample_points_{substance}_{regionCode}.csv",
+                        mime="text/csv"
+                    )
+            with col2:
+                if not facilities.empty:
+                    csv_facilities = facilities.drop(columns=['facWKT']).to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Facilities (CSV)",
+                        data=csv_facilities,
+                        file_name=f"facilities_{substance}_{regionCode}.csv",
+                        mime="text/csv"
+                    )
+            
+        except Exception as e:
+            st.error(f"An error occurred during analysis: {str(e)}")
+            st.info("Please check your parameters and try again.")
 
-# Display results (rest of the code remains the same)
-if st.session_state.query_results:
-    results = st.session_state.query_results
+# Information section
+with st.expander("ℹ️ About this Application"):
+    st.markdown("""
+    ### Overview
+    This application performs upstream tracing analysis to identify potential sources of PFAS contamination 
+    in water samples. It combines multiple knowledge graphs:
     
-    # Metrics
-    st.markdown("### 📊 Results Summary")
-    cols = st.columns(4)
+    - **PFAS Graph**: Contains contamination observation data
+    - **Spatial Graph**: Provides administrative boundaries and spatial relationships
+    - **Hydrology Graph**: Traces upstream flow paths
+    - **Facility Graph**: Identifies industrial facilities
     
-    if 'samples' in results:
-        # Count unique sample points
-        unique_samples = results['samples']['samplePoint'].nunique() if not results['samples'].empty else 0
-        cols[0].metric("Sample Points", unique_samples)
-        cols[1].metric("Total Observations", len(results['samples']))
+    ### How it Works
+    1. **Sample Selection**: Identifies water samples with PFAS concentrations in the specified range
+    2. **Spatial Filtering**: Filters results to the selected administrative region
+    3. **Upstream Tracing**: Uses hydrological data to find upstream areas
+    4. **Facility Identification**: Locates industrial facilities in upstream areas
     
-    if 'facilities' in results:
-        cols[2].metric("Facilities", len(results['facilities']))
-    
-    if 'counties' in results:
-        cols[3].metric("Counties", len(results['counties']))
-    
-    st.markdown("---")
-    
-    # Create map (mapping code remains unchanged)
-    st.subheader("📍 Interactive Map")
-    
-    # Initialize map
-    if selected_county != "All Maine":
-        m = folium.Map(location=[44.5, -69.0], zoom_start=8)
-    else:
-        m = folium.Map(location=[45.2538, -69.4455], zoom_start=7)
-    
-    # (Rest of the mapping code remains the same as original...)
-    
+    ### Data Sources
+    - SPARQL endpoints from FRINK (Framework for Representing INtegrated Knowledge)
+    - NHDPlus V2 hydrology data
+    - NAICS industry classification
+    """)
+
 # Footer
-st.markdown("---")
-st.markdown("🔬 **SAWGraph Spatial Query Demo** | Debug version with execution logging")
