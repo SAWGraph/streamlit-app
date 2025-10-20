@@ -481,7 +481,7 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industry ?industryName ?industr
                     )
                     c += 1
             
-            folium.LayerControl(collapsed=False).add_to(map_obj)
+            folium.LayerControl(collapsed=True).add_to(map_obj)
             
             progress_bar.progress(100)
             status_text.text("Analysis complete!")
