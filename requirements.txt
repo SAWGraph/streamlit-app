@@ -10,6 +10,7 @@
 # certifi>=2023.0.0
 streamlit
 streamlit-folium
+streamlit-searchbox
 folium>=0.12
 geopandas
 pandas

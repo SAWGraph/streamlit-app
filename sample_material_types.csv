@@ -1,0 +1,47 @@
+matType,shortName,label
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.AS,AS,ASH (BOTTOM & FLY)
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.BC,BC,BEDROCK CHIPS
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.BD,BD,BLOOD
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.BM,BM,BUILDING MATERIAL
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.CO,CO,COMPOST
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.DW,DW,DRINKING WATER
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.EG,EG,EGG
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.FA,FA,FLY ASH
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.FE,FE,FEED
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.FR,FR,FRUIT
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.GR,GR,GRAINS (GROWN BY FARM)
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.GRS,GRS,GRASS
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.GW,GW,GROUNDWATER
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.HR,HR,HERBS
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.HT,HT,HEART
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.L,L,LEACHATE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.LG,LG,LEAFY GREENS
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.LV,LV,LIVER
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.MA,MA,MANURE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.MEA,MEA,MEAT
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.MLK,MLK,MILK
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.MTB,MTB,MUSCLE TISSUE BIOPSY
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.MU,MU,MUSCLE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.N,N,NEAT SAMPLE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.NRV,NRV,NON-ROOT VEGETABLES
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.O,O,OFFAL
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.PE,PE,PERFORMANCE EVALUATION
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.PO,PO,PORE WATER
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.POL,POL,POLYMER
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.PW,PW,PROCESS WATER
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.RIN,RIN,RINSATE SAMPLE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.RV,RV,ROOT VEGETABLES
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SA,SA,SAWDUST
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SD,SD,SEDIMENT
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SF,SF,SKINLESS FILLET
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SL,SL,SOIL
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SOF,SOF,SKIN-ON FILLET
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SPG,SPG,SEPTAGE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SR,SR,STORM WATER RUNOFF
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SU,SU,SLUDGE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SW,SW,SURFACE WATER
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.SWS,SWS,SURFACE WATER SUBSTRATE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.V,V,VEGETATION
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.WH,WH,WHOLE
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.WS,WS,WHOLE WITHOUT SKIN
+http://sawgraph.spatialai.org/v1/me-egad-data#sampleMaterialType.WW,WW,WASTE WATER
