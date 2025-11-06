@@ -821,6 +821,61 @@ try:
                     query_region_code = str(selected_state_code).zfill(2)
                 else:
                     query_region_code = str(selected_state_code).zfill(2)
+                
+                # ========== SELECTED PARAMETERS SUMMARY (TOP) ==========
+                st.markdown("### 📋 Selected Parameters")
+                
+                # Build parameter table
+                params_data = []
+                
+                # Substance
+                if selected_substance_name:
+                    params_data.append({
+                        "Parameter": "PFAS Substance",
+                        "Value": selected_substance_name
+                    })
+                else:
+                    params_data.append({
+                        "Parameter": "PFAS Substance",
+                        "Value": "All Substances"
+                    })
+                
+                # Material Type
+                if selected_material_short:
+                    params_data.append({
+                        "Parameter": "Material Type",
+                        "Value": f"{selected_material_short} - {selected_material_label}"
+                    })
+                else:
+                    params_data.append({
+                        "Parameter": "Material Type",
+                        "Value": "All Material Types"
+                    })
+                
+                # Concentration Range
+                params_data.append({
+                    "Parameter": "Concentration Range",
+                    "Value": f"{min_concentration} - {max_concentration} ng/L"
+                })
+                
+                # Geographic Region
+                region_display = selected_state_name
+                if selected_subdivision_name:
+                    region_display = f"{selected_subdivision_name}, {selected_county_name}, {selected_state_name}"
+                elif selected_county_name:
+                    region_display = f"{selected_county_name}, {selected_state_name}"
+                
+                params_data.append({
+                    "Parameter": "Geographic Region",
+                    "Value": region_display
+                })
+                
+                # Display as clean table
+                params_df = pd.DataFrame(params_data)
+                st.table(params_df)
+                
+                st.markdown("---")
+                st.markdown("### 🔬 Query Results")
             
                 # Store results from each step
                 samples_df = None
@@ -1110,413 +1165,6 @@ try:
             
                 for text in summary_text:
                     st.write(text)
-        
-            st.markdown("---")
-        
-            # Create comprehensive parameter summary
-            st.markdown("### 📋 Selected Parameters Summary")
-        
-            # Build parameter table
-            params_data = []
-        
-            # Substance
-            if selected_substance_name:
-                substance_code = selected_substance_uri.split('#')[-1] if selected_substance_uri else ""
-                params_data.append({
-                    "Parameter": "PFAS Substance",
-                    "Selected Value": selected_substance_name,
-                    "Code for Query": f"me_egad:{substance_code}",
-                    "Full URI": selected_substance_uri
-                })
-            else:
-                params_data.append({
-                    "Parameter": "PFAS Substance",
-                    "Selected Value": "All Substances",
-                    "Code for Query": "N/A - No filter",
-                    "Full URI": "N/A"
-                })
-        
-            # Material Type
-            if selected_material_short:
-                material_code = selected_material_uri.split('#')[-1] if selected_material_uri else ""
-                params_data.append({
-                    "Parameter": "Material Type",
-                    "Selected Value": f"{selected_material_short} - {selected_material_label}",
-                    "Code for Query": f"me_egad_data:{material_code}",
-                    "Full URI": selected_material_uri
-                })
-            else:
-                params_data.append({
-                    "Parameter": "Material Type",
-                    "Selected Value": "All Material Types",
-                    "Code for Query": "N/A - No filter",
-                    "Full URI": "N/A"
-                })
-        
-            # Concentration Range
-            params_data.append({
-                "Parameter": "Concentration Min",
-                "Selected Value": f"{min_concentration} ng/L",
-                "Code for Query": str(min_concentration),
-                "Full URI": "N/A"
-            })
-            params_data.append({
-                "Parameter": "Concentration Max",
-                "Selected Value": f"{max_concentration} ng/L",
-                "Code for Query": str(max_concentration),
-                "Full URI": "N/A"
-            })
-        
-            # State
-            if selected_state_code:
-                params_data.append({
-                    "Parameter": "State",
-                    "Selected Value": selected_state_name,
-                    "Code for Query": str(selected_state_code).zfill(2),
-                    "Full URI": f"kwgr:administrativeRegion.USA.{str(selected_state_code).zfill(2)}"
-                })
-            else:
-                params_data.append({
-                    "Parameter": "State",
-                    "Selected Value": "Not Selected",
-                    "Code for Query": "REQUIRED",
-                    "Full URI": "N/A"
-                })
-        
-            # County
-            if selected_county_name:
-                params_data.append({
-                    "Parameter": "County",
-                    "Selected Value": selected_county_name,
-                    "Code for Query": "Filter by label",
-                    "Full URI": "N/A"
-                })
-            else:
-                params_data.append({
-                    "Parameter": "County",
-                    "Selected Value": "All Counties",
-                    "Code for Query": "N/A - No filter",
-                    "Full URI": "N/A"
-                })
-        
-            # Subdivision
-            if selected_subdivision_name:
-                params_data.append({
-                    "Parameter": "Subdivision",
-                    "Selected Value": selected_subdivision_name,
-                    "Code for Query": str(selected_subdivision_code),
-                    "Full URI": f"kwgr:administrativeRegion.USA.{selected_subdivision_code}"
-                })
-            else:
-                params_data.append({
-                    "Parameter": "Subdivision",
-                    "Selected Value": "All Subdivisions",
-                    "Code for Query": "N/A - No filter",
-                    "Full URI": "N/A"
-                })
-        
-            # Display as DataFrame
-            params_df = pd.DataFrame(params_data)
-            st.dataframe(params_df, use_container_width=True, hide_index=True)
-        
-            # Ready-to-use Python code
-            st.markdown("### 💻 Ready-to-Use Python Code")
-        
-            substance_code_line = f"substanceCode = \"me_egad:{selected_substance_uri.split('#')[-1]}\"" if selected_substance_uri else "# substanceCode = None  # All substances"
-            material_code_line = f"matTypeCode = \"me_egad_data:{selected_material_uri.split('#')[-1]}\"" if selected_material_uri else "# matTypeCode = None  # All material types"
-            region_code_line = f"regionCode = \"{str(selected_state_code).zfill(2)}\"" if selected_state_code else "# regionCode = \"REQUIRED\"  # Must select a state!"
-        
-            st.code(f"""
-        # PFAS Analysis Query Parameters
-        # Copy this code to use in your SPARQL queries
-
-        # Substance filter
-        {substance_code_line}
-
-        # Material type filter
-        {material_code_line}
-
-        # Concentration range
-        minValue = {min_concentration}
-        maxValue = {max_concentration}
-
-        # Geographic region
-        {region_code_line}
-
-        # Example SPARQL usage (NEW CORRECT PATTERN):
-        # VALUES ?substance {{{substance_code_line.split('=')[1].strip() if selected_substance_uri else '<me_egad:parameter.SUBSTANCE_A>'}}}
-        # VALUES ?matType {{{material_code_line.split('=')[1].strip() if selected_material_uri else '<me_egad_data:sampleMaterialType.TYPE>'}}}
-        # FILTER (?result_value >= {min_concentration})
-        # FILTER (?result_value <= {max_concentration})
-        # ?s2cell spatial:connectedTo ?regionURI .
-        # FILTER( CONTAINS( STR(?regionURI), ".USA.{str(selected_state_code).zfill(2) if selected_state_code else 'XX'}" ) )
-            """, language="python")
-        
-            # Complete SPARQL Query Example
-            st.markdown("### 🔧 Complete SPARQL Query Example")
-        
-            # Build VALUES clauses
-            substance_values = f"VALUES ?substance {{<{selected_substance_uri}>}}" if selected_substance_uri else "# No substance filter - will return all substances"
-            material_values = f"VALUES ?matType {{<{selected_material_uri}>}}" if selected_material_uri else "# No material type filter - will return all types"
-        
-            # Build region filter using NEW CORRECT logic with CONTAINS
-            region_code = str(selected_state_code).zfill(2) if selected_state_code else "XX"
-            region_filter = f'FILTER( CONTAINS( STR(?regionURI), ".USA.{region_code}" ) )'
-        
-            sparql_query = f"""
-        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-        PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
-        PREFIX qudt: <http://qudt.org/schema/qudt/>
-        PREFIX me_egad: <http://sawgraph.spatialai.org/v1/me-egad#>
-        PREFIX me_egad_data: <http://sawgraph.spatialai.org/v1/me-egad-data#>
-        PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
-
-        SELECT ?observation ?sp ?s2cell ?substance ?sample ?matType ?result_value ?unit ?regionURI WHERE {{
-        ?observation rdf:type coso:ContaminantObservation;
-            coso:observedAtSamplePoint ?sp;
-            coso:ofSubstance ?substance;
-            coso:analyzedSample ?sample;
-            coso:hasResult ?result.
-    
-        ?sample coso:sampleOfMaterialType ?matType.
-    
-        ?result coso:measurementValue ?result_value;
-                coso:measurementUnit ?unit.
-    
-        # CRITICAL: Unit filter ensures concentration is in ng/L
-        VALUES ?unit {{<http://qudt.org/vocab/unit/NanoGM-PER-L>}}
-    
-        # Filters based on your selection:
-        {substance_values}
-        {material_values}
-        FILTER (?result_value >= {min_concentration})
-        FILTER (?result_value <= {max_concentration})
-    
-        # Region filter - NEW CORRECT PATTERN using CONTAINS:
-        # This pattern works for states, counties, and subdivisions
-        # OLD (broken): ?s2cell spatial:connectedTo kwgr:administrativeRegion.USA.{region_code}
-        # NEW (correct): Uses CONTAINS to match partial URI strings
-        ?sp spatial:connectedTo ?s2cell .
-        ?s2cell spatial:connectedTo ?regionURI .
-        {region_filter}
-        }}
-        LIMIT 100
-        """
-        
-            st.code(sparql_query, language="sparql")
-        
-            # Add explanation of the new pattern
-            st.info("""
-            **📌 About the Region Filter Pattern:**
-        
-            This query uses the **NEW CORRECT PATTERN** with `CONTAINS()` instead of direct URI matching.
-        
-            ✅ **Why this works:** The CONTAINS pattern matches any region URI that includes your FIPS code, 
-            which properly handles states, counties, and subdivisions.
-        
-            ❌ **Old broken pattern:** `?s2cell spatial:connectedTo kwgr:administrativeRegion.USA.23` 
-            (This didn't work reliably)
-            """)
-        
-            # Quick stats
-            st.markdown("### 📊 Query Scope")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                scope = "Specific" if selected_substance_name else "All"
-                st.metric("Substance Scope", scope)
-            with col2:
-                scope = "Specific" if selected_material_short else "All"
-                st.metric("Material Type Scope", scope)
-            with col3:
-                if selected_subdivision_name:
-                    scope = "Subdivision"
-                elif selected_county_name:
-                    scope = "County"
-                elif selected_state_code:
-                    scope = "State"
-                else:
-                    scope = "None"
-                st.metric("Geographic Scope", scope)
-        
-            st.markdown("---")
-    
-        # Display selection summary
-        st.markdown("---")
-        st.subheader("📍 Your Selection")
-    
-        # Show substance selection if any
-        if selected_substance_name:
-            st.markdown("### 🧪 Selected Substance")
-            col_sub1, col_sub2 = st.columns(2)
-            with col_sub1:
-                st.write(f"**PFAS Compound:** {selected_substance_name}")
-                st.write(f"**URI:** `{selected_substance_uri}`")
-            with col_sub2:
-                # Extract the short code for SPARQL usage
-                substance_code = selected_substance_uri.split('#')[-1] if selected_substance_uri else ""
-                st.markdown("### Usage in SPARQL")
-                st.code(f"""
-        # Substance code:
-        substanceCode = "me_egad:{substance_code}"
-
-        # In SPARQL query:
-        ?obs coso:ofSubstance me_egad:{substance_code}
-                """, language="python")
-            st.markdown("---")
-    
-        # Show material type selection if any
-        if selected_material_short:
-            st.markdown("### 🧫 Selected Material Type")
-            col_mat1, col_mat2 = st.columns(2)
-            with col_mat1:
-                st.write(f"**Material Type:** {selected_material_short} - {selected_material_label}")
-                st.write(f"**URI:** `{selected_material_uri}`")
-            with col_mat2:
-                # Extract the short code for SPARQL usage
-                material_code = selected_material_uri.split('#')[-1] if selected_material_uri else ""
-                st.markdown("### Usage in SPARQL")
-                st.code(f"""
-        # Material type code:
-        matTypeCode = "me_egad_data:{material_code}"
-
-        # In SPARQL query:
-        ?sample coso:sampleOfMaterialType me_egad_data:{material_code}
-                """, language="python")
-            st.markdown("---")
-    
-        # Show concentration range
-        if min_concentration > 0 or max_concentration < 500:
-            st.markdown("### 📊 Concentration Range")
-            col_conc1, col_conc2 = st.columns(2)
-            with col_conc1:
-                st.write(f"**Range:** {min_concentration} - {max_concentration} ng/L")
-            
-                # Provide context
-                if max_concentration <= 10:
-                    st.info("🟢 **Low range** - background/minimal detection levels")
-                elif max_concentration <= 70:
-                    st.info("🟡 **Moderate range** - measurable contamination")
-                else:
-                    st.warning("🔴 **High range** - significant contamination concern")
-        
-            with col_conc2:
-                st.markdown("### Usage in SPARQL")
-                st.code(f"""
-        # Concentration filter:
-        minValue = {min_concentration}
-        maxValue = {max_concentration}
-
-        # In SPARQL query:
-        FILTER (?result_value >= {min_concentration})
-        FILTER (?result_value <= {max_concentration})
-                """, language="python")
-            st.markdown("---")
-    
-        if selected_state_code:
-            col1, col2 = st.columns(2)
-        
-            with col1:
-                st.markdown("### 📍 Selected Region")
-                st.write(f"**State:** {selected_state_name}")
-                st.write(f"**FIPS Code:** `{str(selected_state_code).zfill(2)}`")
-            
-                if selected_county_name:
-                    st.write(f"**County:** {selected_county_name}")
-                else:
-                    st.write(f"**County:** *All counties in {selected_state_name}*")
-            
-                if selected_subdivision_name:
-                    st.write(f"**Subdivision:** {selected_subdivision_name}")
-                    st.write(f"**Subdivision FIPS:** `{selected_subdivision_code}`")
-                elif selected_county_name:
-                    st.write(f"**Subdivision:** *All subdivisions in {selected_county_name}*")
-        
-            with col2:
-                st.markdown("### Usage in SPARQL")
-                st.code(f"""
-        # Use this FIPS code in your queries:
-        regionCode = "{str(selected_state_code).zfill(2)}"
-
-        # In SPARQL query (NEW CORRECT PATTERN):
-        ?s2cell spatial:connectedTo ?regionURI .
-        FILTER( CONTAINS( STR(?regionURI), ".USA.{str(selected_state_code).zfill(2)}" ) )
-                """, language="python")
-        
-            # Show statistics for selected region
-            st.markdown("---")
-            st.subheader("📊 Region Statistics")
-        
-            if selected_county_name:
-                # Count subdivisions in this county (handle both with and without "Geometry of" prefix)
-                county_subs = state_subdivisions[
-                    (state_subdivisions['county_name'] == selected_county_name) |
-                    (state_subdivisions['county_name'] == f'Geometry of {selected_county_name}')
-                ]
-                st.info(f"This county contains **{len(county_subs)}** subdivisions")
-            
-                # Show list of subdivisions
-                with st.expander("View all subdivisions in this county"):
-                    if not county_subs.empty:
-                        display_df = county_subs[['subdivision_name', 'fipsCode']].copy()
-                        display_df.columns = ['Subdivision Name', 'FIPS Code']
-                        st.dataframe(display_df, use_container_width=True)
-            else:
-                # Show counties in state
-                if not state_subdivisions.empty:
-                    # Clean county names and group
-                    state_subdivisions_clean = state_subdivisions.copy()
-                    state_subdivisions_clean['county_name_clean'] = state_subdivisions_clean['county_name'].str.replace('Geometry of ', '', regex=False)
-                    counties_list = state_subdivisions_clean.groupby('county_name_clean').size().reset_index()
-                    counties_list.columns = ['County Name', 'Number of Subdivisions']
-                    counties_list = counties_list.sort_values('County Name')
-                
-                    st.info(f"**{selected_state_name}** contains **{len(counties_list)}** counties with subdivision data")
-                
-                    with st.expander("View all counties in this state"):
-                        st.dataframe(counties_list, use_container_width=True)
-        else:
-            st.info("👈 Please select a state from the sidebar to begin")
-    
-        # Export selection button
-        if selected_state_code or selected_substance_name or selected_material_short:
-            st.markdown("---")
-            st.subheader("💾 Export Selection")
-        
-            # Create export data
-            export_data = {
-                "PFAS Substance": selected_substance_name if selected_substance_name else "All",
-                "Substance URI": selected_substance_uri if selected_substance_uri else "N/A",
-                "Material Type": f"{selected_material_short} - {selected_material_label}" if selected_material_short else "All",
-                "Material Type URI": selected_material_uri if selected_material_uri else "N/A",
-                "Min Concentration (ng/L)": min_concentration,
-                "Max Concentration (ng/L)": max_concentration,
-                "State": selected_state_name if selected_state_name else "N/A",
-                "State FIPS": str(selected_state_code).zfill(2) if selected_state_code else "N/A",
-                "County": selected_county_name if selected_county_name else "All",
-                "Subdivision": selected_subdivision_name if selected_subdivision_name else "All",
-                "Subdivision FIPS": str(selected_subdivision_code) if selected_subdivision_code else "N/A"
-            }
-        
-            export_df = pd.DataFrame([export_data])
-            csv_export = export_df.to_csv(index=False)
-        
-            # Create filename based on selections
-            filename_parts = []
-            if selected_substance_name:
-                filename_parts.append(selected_substance_name)
-            if selected_material_short:
-                filename_parts.append(selected_material_short)
-        if selected_state_code:
-            filename_parts.append(str(selected_state_code).zfill(2))
-        filename = "_".join(filename_parts) if filename_parts else "selection"
-        
-        st.download_button(
-            label="📥 Download Selection as CSV",
-            data=csv_export,
-            file_name=f"selection_{filename}.csv",
-            mime="text/csv"
-        )
 
     elif query_number == 2:
         # SAMPLES NEAR FACILITIES QUERY
