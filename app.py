@@ -244,16 +244,20 @@ WHERE {{
 
     try:
         start_time = time.time()
+        # Use shorter timeout for cloud deployment
+        timeout_seconds = 120 if os.environ.get('STREAMLIT_SERVER_ADDRESS') else 300
+        
         response = requests.post(
             sparql_endpoint,
             data={"query": query},
             headers=headers,
-            timeout=300
+            timeout=timeout_seconds
         )
         elapsed = time.time() - start_time
 
         debug_info["response_status"] = response.status_code
         debug_info["response_time_sec"] = round(elapsed, 2)
+        debug_info["timeout_used"] = timeout_seconds
 
         # Only keep a short snippet of the response text for debugging
         try:
@@ -271,9 +275,25 @@ WHERE {{
                 print(f"   > Combined query complete: Retrieved {len(df_results)} rows.")
                 debug_info["row_count"] = len(df_results)
             return df_results, None, debug_info
+        elif response.status_code == 504 or response.status_code == 502:
+            error_msg = "⏱️ Query timeout: The query is too complex for the server. Try narrowing your search by:"
+            error_msg += "\n• Selecting a specific PFAS substance instead of 'All Substances'"
+            error_msg += "\n• Choosing a specific county instead of the entire state"
+            error_msg += "\n• Adjusting the concentration range"
+            debug_info["timeout_error"] = True
+            return None, error_msg, debug_info
         else:
-            return None, f"Error {response.status_code}: {response.text}", debug_info
+            return None, f"Error {response.status_code}: {response.text[:200]}", debug_info
 
+    except requests.exceptions.Timeout:
+        elapsed = time.time() - start_time
+        debug_info["exception"] = "Request timeout"
+        debug_info["response_time_sec"] = round(elapsed, 2)
+        error_msg = f"⏱️ Query timed out after {timeout_seconds} seconds. The query is too complex. Try:"
+        error_msg += "\n• Selecting a specific PFAS substance instead of 'All Substances'"
+        error_msg += "\n• Choosing a specific county instead of the entire state"
+        error_msg += "\n• Using a narrower concentration range"
+        return None, error_msg, debug_info
     except requests.exceptions.RequestException as e:
         debug_info["exception"] = str(e)
         return None, f"Network error: {str(e)}", debug_info
@@ -893,6 +913,20 @@ try:
                 # Display as clean table
                 params_df = pd.DataFrame(params_data)
                 st.table(params_df)
+                
+                # Warning for potentially slow queries
+                is_state_level = not selected_county_name and not selected_subdivision_code
+                is_all_substances = not selected_substance_name
+                
+                if is_state_level and is_all_substances:
+                    st.warning("""
+                    ⚠️ **Performance Warning**: Querying all PFAS substances across an entire state may take a long time or timeout.
+                    
+                    For better performance, consider:
+                    - Selecting a specific PFAS substance (e.g., PFOS, PFOA)
+                    - Choosing a specific county within the state
+                    - Narrowing the concentration range
+                    """)
                 
                 st.markdown("---")
                 st.markdown("### 🔬 Query Results")
