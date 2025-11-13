@@ -23,6 +23,8 @@ from shapely import wkt
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # SPARQL Endpoints
 ENDPOINT_URLS = {
     'sawgraph': "https://frink.apps.renci.org/sawgraph/sparql",
@@ -96,8 +98,7 @@ def parse_sparql_results(results):
 @st.cache_data
 def load_fips_data():
     """Load and parse the FIPS codes CSV"""
-    csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-                            "us_administrative_regions_fips.csv")
+    csv_path = os.path.join(PROJECT_DIR, "us_administrative_regions_fips.csv")
     df = pd.read_csv(csv_path)
     return df
 
@@ -105,8 +106,7 @@ def load_fips_data():
 @st.cache_data
 def load_substances_data():
     """Load and parse the PFAS substances CSV"""
-    csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-                            "pfas_substances.csv")
+    csv_path = os.path.join(PROJECT_DIR, "pfas_substances.csv")
     df = pd.read_csv(csv_path)
     return df
 
@@ -114,8 +114,7 @@ def load_substances_data():
 @st.cache_data
 def load_material_types_data():
     """Load and parse the sample material types CSV"""
-    csv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-                            "sample_material_types.csv")
+    csv_path = os.path.join(PROJECT_DIR, "sample_material_types.csv")
     df = pd.read_csv(csv_path)
     return df
 
