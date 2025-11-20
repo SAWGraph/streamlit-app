@@ -174,27 +174,11 @@ def execute_sparql_query(substance_uri, material_uri, min_conc, max_conc, region
     7. Get WKT geometry for mapping (optional - may not exist for all samples)
     8. Connect sample point to S2 grid cell (needed for Step 2)
     
-    THE REGION FILTER PATTERN (Lines 192-195):
-    -------------------------------------------
-    This is a KEY innovation that makes the query work reliably:
-    
-    OLD PATTERN (BROKEN):
-        ?s2cell spatial:connectedTo kwgr:administrativeRegion.USA.23
-        
-        Problem: Direct URI matching fails when the knowledge graph has
-                 multiple URI formats or indirect region connections
-    
-    NEW PATTERN (WORKING):
-        ?sp spatial:connectedTo ?s2cell .
-        ?s2cell spatial:connectedTo ?regionURI .
-        FILTER( CONTAINS( STR(?regionURI), ".USA.23" ) )
-        
-        Solution: 
-        - Use a variable (?regionURI) to capture ANY region connection
-        - Convert URI to string and check if it CONTAINS the FIPS code
-        - Works for states (.USA.23), counties (.USA.23019), 
-          subdivisions (.USA.2301912345)
-        - Flexible and robust across all geographic levels
+    THE REGION FILTER PATTERN (ADAPTED FROM NOTEBOOK):
+    --------------------------------------------------
+    The region filtering logic adapts based on the length of the region code:
+    - For subdivisions (len > 5): Uses direct VALUES clause with DataCommons URI.
+    - For states/counties (len <= 5): Uses administrativePartOf+ path to USA region.
     
     PARAMETERS:
     -----------
@@ -222,13 +206,6 @@ def execute_sparql_query(substance_uri, material_uri, min_conc, max_conc, region
             - matType: Material type URI
             - regionURI: Matched administrative region URI
         error (str or None): Error message if query failed
-    
-    TECHNICAL NOTES:
-    ----------------
-    - Uses GET request (query in URL parameters)
-    - 180-second timeout (contamination queries can be slow)
-    - Returns empty DataFrame if no results found (not an error)
-    - The s2cell column is CRITICAL - it's the input to Step 2
     """
     print(f"--- Running Step 1 (on 'federation' endpoint) ---")
     print(f"Finding samples in region: {region_code}")
@@ -238,6 +215,16 @@ def execute_sparql_query(substance_uri, material_uri, min_conc, max_conc, region
     substance_filter = f"VALUES ?substance {{<{substance_uri}>}}" if substance_uri else "# No substance filter"
     material_filter = f"VALUES ?matType {{<{material_uri}>}}" if material_uri else "# No material type filter"
     
+    # Region filter logic based on code length (from notebook)
+    if len(region_code) > 5:
+        # Subdivision (city/town) level
+        region_pattern = f"VALUES ?regionURI {{<https://datacommons.org/browser/geoId/{region_code}>}}"
+    else:
+        # State or County level
+        region_pattern = f"""
+    ?regionURI rdf:type kwg-ont:AdministrativeRegion_3 ;
+               kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{region_code} ."""
+
     # Build the SPARQL query with f-string substitution
     query = f"""
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -246,6 +233,8 @@ PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
 PREFIX qudt: <http://qudt.org/schema/qudt/>
 PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
 
 SELECT ?observation ?sp ?s2cell ?spWKT ?substance ?sample ?matType ?result_value ?unit ?regionURI
 WHERE {{
@@ -276,11 +265,12 @@ WHERE {{
     # Get WKT coordinates for mapping (optional - may not exist for all samples)
     OPTIONAL {{ ?sp geo:hasGeometry/geo:asWKT ?spWKT . }}
     
-    # Region filter - NEW CORRECT PATTERN using CONTAINS:
-    # This connects sample → S2 cell → region and checks if region URI contains FIPS code
+    # Region filter adapted from notebook
+    ?sp spatial:connectedTo ?regionURI .
+    {region_pattern}
+
+    # Connect to S2 cell (needed for Step 2)
     ?sp spatial:connectedTo ?s2cell .
-    ?s2cell spatial:connectedTo ?regionURI .
-    FILTER( CONTAINS( STR(?regionURI), ".USA.{region_code}" ) )
 }}
 """
     
