@@ -20,6 +20,9 @@ from streamlit_folium import st_folium
 import geopandas as gpd
 from shapely import wkt
 
+# Import query modules
+from utils.nearby_queries import NAICS_INDUSTRIES, execute_nearby_analysis
+
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -464,6 +467,8 @@ def parse_regions(df):
         counties['state_code'] = counties['fipsCode'].astype(str).str.zfill(5).str[:2]
         # Get county code (5-digit FIPS)
         counties['county_code'] = counties['fipsCode'].astype(str).str.zfill(5)
+        # Remove duplicate counties (keep first occurrence based on county_code)
+        counties = counties.drop_duplicates(subset=['county_code'], keep='first')
     
     # Get subdivisions (codes longer than county level)
     # Subdivisions are longer (usually 10+ digits)
@@ -523,7 +528,124 @@ try:
         with col5:
             st.metric("Subdivisions", len(subdivisions_df))
     
+
+    # ========================================
+    # SHARED SIDEBAR: Geographic Region Selection (for ALL queries)
+    # ========================================
+    st.sidebar.header("🔧 Analysis Configuration")
+    
+    # Initialize session state for region selection
+    if 'selected_state' not in st.session_state:
+        st.session_state.selected_state = None
+    if 'selected_county' not in st.session_state:
+        st.session_state.selected_county = None
+    if 'selected_subdivision' not in st.session_state:
+        st.session_state.selected_subdivision = None
+    
+    # GEOGRAPHIC REGION SELECTION (Shared by all queries)
+    st.sidebar.markdown("### 📍 Geographic Region")
+    st.sidebar.markdown("🆃 **Required**: Select at least a state")
+    
+    # 1. STATE SELECTION (Mandatory)
+    state_options = ["-- Select a State --"] + states_df['state_name'].tolist()
+    selected_state_display = st.sidebar.selectbox(
+        "1️⃣ Select State",
+        state_options,
+        help="Select a US state or territory"
+    )
+    
+    # Get the selected state's FIPS code
+    selected_state_code = None
+    selected_state_name = None
+    if selected_state_display != "-- Select a State --":
+        selected_state_name = selected_state_display
+        state_row = states_df[states_df['state_name'] == selected_state_display]
+        if not state_row.empty:
+            selected_state_code = state_row.iloc[0]['fipsCode']
+            st.session_state.selected_state = {
+                'name': selected_state_name,
+                'code': str(selected_state_code).zfill(2)
+            }
+    
+    # 2. COUNTY SELECTION (Optional, filtered by state)
+    selected_county_name = None
+    selected_county_code = None
+    state_subdivisions = pd.DataFrame()
+    state_counties = pd.DataFrame()
+    
+    if selected_state_code:
+        state_counties = counties_df[
+            counties_df['state_code'] == str(selected_state_code).zfill(2)
+        ]
+        state_subdivisions = subdivisions_df[
+            subdivisions_df['state_code'] == str(selected_state_code).zfill(2)
+        ]
+        
+        if not state_counties.empty:
+            county_options = ["-- All Counties --"] + state_counties['county_name'].sort_values().tolist()
+            selected_county_display = st.sidebar.selectbox(
+                "2️⃣ Select County (Optional)",
+                county_options,
+                help=f"Select a county within {selected_state_name}"
+            )
+            
+            if selected_county_display != "-- All Counties --":
+                selected_county_name = selected_county_display
+                county_row = state_counties[state_counties['county_name'] == selected_county_name]
+                if not county_row.empty:
+                    selected_county_code = county_row.iloc[0]['county_code']
+                st.session_state.selected_county = selected_county_name
+                st.session_state.selected_county_code = selected_county_code
+            else:
+                st.session_state.selected_county = None
+                st.session_state.selected_county_code = None
+        else:
+            st.sidebar.info(f"ℹ️ No county-level data available for {selected_state_name}.")
+    else:
+        st.sidebar.info("👆 Please select a state first")
+    
+    # 3. SUBDIVISION SELECTION (Optional, filtered by county)
+    selected_subdivision_code = None
+    selected_subdivision_name = None
+    if selected_state_code and selected_county_code:
+        county_subdivisions = state_subdivisions[
+            state_subdivisions['county_code'] == selected_county_code
+        ]
+        
+        if not county_subdivisions.empty:
+            subdivision_options = ["-- All Subdivisions --"] + \
+                county_subdivisions['subdivision_name'].dropna().sort_values().tolist()
+            
+            selected_subdivision_display = st.sidebar.selectbox(
+                "3️⃣ Select Subdivision (Optional)",
+                subdivision_options,
+                help=f"Select a subdivision within {selected_county_name}"
+            )
+            
+            if selected_subdivision_display != "-- All Subdivisions --":
+                selected_subdivision_name = selected_subdivision_display
+                subdivision_row = county_subdivisions[
+                    county_subdivisions['subdivision_name'] == selected_subdivision_display
+                ]
+                if not subdivision_row.empty:
+                    selected_subdivision_code = str(subdivision_row.iloc[0]['fipsCode']).zfill(10)
+                st.session_state.selected_subdivision = {
+                    'name': selected_subdivision_name,
+                    'code': selected_subdivision_code
+                }
+            else:
+                st.session_state.selected_subdivision = None
+        else:
+            st.sidebar.info(f"ℹ️ No subdivisions found for {selected_county_name}")
+    elif selected_state_code and selected_county_name:
+        st.sidebar.info("No subdivisions available for this county")
+        st.session_state.selected_subdivision = None
+    
+    st.sidebar.markdown("---")
+    
+    # ========================================
     # Display UI based on query type selection
+    # ========================================
     if query_number == 1:
         # PFAS UPSTREAM TRACING QUERY
         st.markdown("""
@@ -535,10 +657,7 @@ try:
         **3-Step Process:** Find contamination → Trace upstream → Identify potential sources
         """)
         
-        # Sidebar parameters
-        st.sidebar.header("🔧 Analysis Configuration")
-    
-        # Initialize session state
+        # Initialize session state for Query 1 specific params
         if 'selected_substance' not in st.session_state:
             st.session_state.selected_substance = None
         if 'selected_material_type' not in st.session_state:
@@ -547,121 +666,9 @@ try:
             st.session_state.conc_min = 0
         if 'conc_max' not in st.session_state:
             st.session_state.conc_max = 100
-        if 'selected_state' not in st.session_state:
-            st.session_state.selected_state = None
-        if 'selected_county' not in st.session_state:
-            st.session_state.selected_county = None
-        if 'selected_subdivision' not in st.session_state:
-            st.session_state.selected_subdivision = None
         
-        # GEOGRAPHIC REGION SELECTION (Moved to top)
-        st.sidebar.markdown("### 📍 Geographic Region")
-        st.sidebar.markdown("🆃 **Required**: Select at least a state")
-    
-        # 1. STATE SELECTION (Mandatory)
-        state_options = ["-- Select a State --"] + states_df['state_name'].tolist()
-        selected_state_display = st.sidebar.selectbox(
-            "1️⃣ Select State",
-            state_options,
-            help="Select a US state or territory"
-        )
-    
-        # Get the selected state's FIPS code
-        selected_state_code = None
-        selected_state_name = None
-        if selected_state_display != "-- Select a State --":
-            selected_state_name = selected_state_display
-            state_row = states_df[states_df['state_name'] == selected_state_display]
-            if not state_row.empty:
-                selected_state_code = state_row.iloc[0]['fipsCode']
-                st.session_state.selected_state = {
-                    'name': selected_state_name,
-                    'code': str(selected_state_code).zfill(2)
-                }
-    
-        # 2. COUNTY SELECTION (Optional, filtered by state)
-        selected_county_name = None
-        selected_county_code = None
-        state_subdivisions = pd.DataFrame()  # Initialize empty DataFrame
-        state_counties = pd.DataFrame()  # Initialize empty DataFrame
-        
-        if selected_state_code:
-            # Filter counties by state using the actual counties dataframe
-            state_counties = counties_df[
-                counties_df['state_code'] == str(selected_state_code).zfill(2)
-            ]
-            
-            # Also filter subdivisions by state for later use
-            state_subdivisions = subdivisions_df[
-                subdivisions_df['state_code'] == str(selected_state_code).zfill(2)
-            ]
-        
-            if not state_counties.empty:
-                # Get county names directly from counties dataframe
-                county_options = ["-- All Counties --"] + state_counties['county_name'].sort_values().tolist()
-                selected_county_display = st.sidebar.selectbox(
-                    "2️⃣ Select County (Optional)",
-                    county_options,
-                    help=f"Select a county within {selected_state_name}"
-                )
-            
-                if selected_county_display != "-- All Counties --":
-                    selected_county_name = selected_county_display
-                    # Get county code from counties_df
-                    county_row = state_counties[state_counties['county_name'] == selected_county_name]
-                    if not county_row.empty:
-                        selected_county_code = county_row.iloc[0]['county_code']
-                    st.session_state.selected_county = selected_county_name
-                    st.session_state.selected_county_code = selected_county_code
-                else:
-                    st.session_state.selected_county = None
-                    st.session_state.selected_county_code = None
-            else:
-                # No counties found for this state (e.g., Alaska, or incomplete data)
-                st.sidebar.info(f"ℹ️ No county-level data available for {selected_state_name}. You can query at the state level.")
-        else:
-            st.sidebar.info("👆 Please select a state first")
-        
-        # 3. SUBDIVISION SELECTION (Optional, filtered by county)
-        selected_subdivision_code = None
-        selected_subdivision_name = None
-        if selected_state_code and selected_county_code:
-            # Filter subdivisions by county code (more accurate than county name)
-            county_subdivisions = state_subdivisions[
-                state_subdivisions['county_code'] == selected_county_code
-            ]
-        
-            if not county_subdivisions.empty:
-                subdivision_options = ["-- All Subdivisions --"] + \
-                    county_subdivisions['subdivision_name'].dropna().sort_values().tolist()
-            
-                selected_subdivision_display = st.sidebar.selectbox(
-                    "3️⃣ Select Subdivision (Optional)",
-                    subdivision_options,
-                    help=f"Select a subdivision within {selected_county_name}"
-                )
-            
-                if selected_subdivision_display != "-- All Subdivisions --":
-                    selected_subdivision_name = selected_subdivision_display
-                    subdivision_row = county_subdivisions[
-                        county_subdivisions['subdivision_name'] == selected_subdivision_display
-                    ]
-                    if not subdivision_row.empty:
-                        selected_subdivision_code = str(subdivision_row.iloc[0]['fipsCode']).zfill(10)
-                    st.session_state.selected_subdivision = {
-                        'name': selected_subdivision_name,
-                        'code': selected_subdivision_code
-                    }
-                else:
-                    st.session_state.selected_subdivision = None
-            else:
-                st.sidebar.info(f"ℹ️ No subdivisions found for {selected_county_name}")
-        elif selected_state_code and selected_county_name: # This block handles the case where a county name is selected but no code is available (e.g., if state_counties was empty)
-            st.sidebar.info("No subdivisions available for this county")
-            st.session_state.selected_subdivision = None
-        
-        # Query Parameters Section
-        st.sidebar.markdown("---")
+        # Query 1 specific parameters in sidebar form
+        st.sidebar.markdown("### 🧪 Query Parameters")
         
         # Wrap parameters in a form to prevent immediate reruns
         with st.sidebar.form(key="query_params_form"):
@@ -1029,7 +1036,8 @@ try:
                         key="download_facilities"
                     )
                 
-                # Flat Industry Breakdown
+                # Flat Industry Breakdown + Streamlit-based "Toggle All" control
+                selected_facility_groups = None  # Will be used later when building the map
                 if 'industryName' in facilities_df.columns:
                     with st.expander("🏭 Industry Breakdown", expanded=False):
                         st.markdown("### Industry Types")
@@ -1048,23 +1056,16 @@ try:
                             )
                             
                             # Prioritize more specific codes (longer length) for the same facility
-                            # Add length column for sorting
                             flat_data['code_len'] = flat_data['code_clean'].str.len()
-                            
-                            # Sort by facility and code length (descending) so longest code comes first
                             flat_data = flat_data.sort_values(['facility', 'code_len'], ascending=[True, False])
-                            
-                            # Deduplicate facilities - keep only the one with the longest code
                             flat_data = flat_data.drop_duplicates(subset=['facility'], keep='first')
                             
-                            # Format name as "Name (Code)"
                             flat_data['display_name'] = flat_data.apply(
                                 lambda row: f"{row['industryName']} ({row['code_clean']})" if row['code_clean'] else row['industryName'],
                                 axis=1
                             )
                         else:
                             flat_data['display_name'] = flat_data['industryName']
-                            # Simple deduplication if no codes
                             flat_data = flat_data.drop_duplicates(subset=['facility'], keep='first')
                         
                         # Group by display name
@@ -1073,16 +1074,15 @@ try:
                         ).reset_index()
                         
                         # Calculate percentage
-                        total_facs = flat_data['facility'].nunique() # Use deduplicated count
+                        total_facs = flat_data['facility'].nunique()
                         if total_facs > 0:
-                            industry_summary['Percentage'] = (industry_summary['Facilities'] / total_facs * 100).map('{:.1f}%'.format)
+                            industry_summary['Percentage'] = (
+                                industry_summary['Facilities'] / total_facs * 100
+                            ).map('{:.1f}%'.format)
                         else:
                             industry_summary['Percentage'] = "0.0%"
                         
-                        # Rename columns
                         industry_summary.columns = ['Industry', 'Facilities', 'Percentage']
-                        
-                        # Sort by count
                         industry_summary = industry_summary.sort_values('Facilities', ascending=False).reset_index(drop=True)
                         
                         # Display as table
@@ -1231,70 +1231,52 @@ try:
                         )
                 
                     # Add facilities (colored by industry)
+                    facility_layer_names = []  # Track facility layer names for JS
+                    
                     if facilities_gdf is not None and not facilities_gdf.empty:
-                        if 'industryName' in facilities_gdf.columns:
+                        # Determine grouping column (Subsector > Group > Industry)
+                        group_col = 'industryName' # Default
+                        
+                        if 'industrySubsectorName' in facilities_gdf.columns and facilities_gdf['industrySubsectorName'].notna().any():
+                            group_col = 'industrySubsectorName'
+                        elif 'industryGroupName' in facilities_gdf.columns and facilities_gdf['industryGroupName'].notna().any():
+                            group_col = 'industryGroupName'
+                            
+                        if group_col in facilities_gdf.columns:
                             # Group by industry and assign colors
                             colors = ['MidnightBlue','MediumBlue','SlateBlue','MediumSlateBlue', 
                                      'DodgerBlue','DeepSkyBlue','SkyBlue','CadetBlue','DarkCyan',
                                      'LightSeaGreen','MediumSeaGreen','PaleVioletRed','Purple',
                                      'Orchid','Fuchsia','MediumVioletRed','HotPink','LightPink']
                         
-                            industries = facilities_gdf['industryName'].unique()
+                            # Count facilities per group and sort by count (descending)
+                            group_counts = facilities_gdf.groupby(group_col).size().sort_values(ascending=False)
+                            sorted_groups = group_counts.index.tolist()
+                            total_facilities = len(facilities_gdf)
                             
-                            # First, add "All Facilities" as a single combined layer
-                            try:
-                                facilities_gdf.explore(
-                                    m=map_obj,
-                                    name='<span style="color:#4169E1;"><b>🏭 All Facilities (Toggle All)</b></span>',
-                                    column='industryName',
-                                    cmap=colors[:len(industries)],
-                                    marker_kwds=dict(radius=6),
-                                    popup=['facilityName', 'industryName'] if all(col in facilities_gdf.columns for col in ['facilityName', 'industryName']) else True,
-                                    tooltip=['facilityName'] if 'facilityName' in facilities_gdf.columns else None,
-                                    show=True,
-                                    legend=False
-                                )
-                            except:
-                                # Fallback: just add all facilities in one color
-                                facilities_gdf.explore(
-                                    m=map_obj,
-                                    name='<span style="color:#4169E1;"><b>🏭 All Facilities</b></span>',
-                                    color='RoyalBlue',
-                                    marker_kwds=dict(radius=6),
-                                    popup=['facilityName', 'industryName'] if all(col in facilities_gdf.columns for col in ['facilityName', 'industryName']) else True,
-                                    tooltip=['facilityName'] if 'facilityName' in facilities_gdf.columns else None,
-                                    show=True
-                                )
-                            
-                            # Then add individual industry layers (hidden by default)
-                            for idx, industry in enumerate(industries):
-                                industry_facilities = facilities_gdf[facilities_gdf['industryName'] == industry]
+                            # Individual industry groups (regular, independent)
+                            for idx, group in enumerate(sorted_groups):
+                                group_facilities = facilities_gdf[facilities_gdf[group_col] == group]
+                                count = len(group_facilities)
                                 color = colors[idx % len(colors)]
-                                industry_facilities.explore(
+                                layer_name = f'🏭 {group} ({count})'
+                                
+                                group_facilities.explore(
                                     m=map_obj,
-                                    name=f'<span style="color:{color};">🏭 {industry}</span>',
+                                    name=f'<span style="color:{color};">{layer_name}</span>',
                                     color=color,
                                     marker_kwds=dict(radius=6),
-                                    popup=['facilityName', 'industryName'] if all(col in industry_facilities.columns for col in ['facilityName', 'industryName']) else True,
-                                    tooltip=['facilityName'] if 'facilityName' in industry_facilities.columns else None,
-                                    show=False
-                                )
-                        else:
-                            # No industry info, just plot all facilities in one color
-                            facilities_gdf.explore(
-                                m=map_obj,
-                                name='<span style="color:Blue;">🏭 All Facilities</span>',
-                                color='Blue',
-                                marker_kwds=dict(radius=6),
-                                popup=['facilityName'] if 'facilityName' in facilities_gdf.columns else True,
+                                    popup=['facilityName', 'industryName'] if all(col in group_facilities.columns for col in ['facilityName', 'industryName']) else True,
+                                    tooltip=['facilityName', 'industryName'] if 'facilityName' in group_facilities.columns else None,
                                 show=True
                             )
                 
                     # Add OpenStreetMap base layer (explicitly named)
                     folium.TileLayer('openstreetmap', name='OpenStreetMap').add_to(map_obj)
                 
-                    # Add layer control (collapsed by default to avoid cluttering the map)
-                    folium.LayerControl(collapsed=True).add_to(map_obj)
+                    # Add layer control
+                    folium.LayerControl(collapsed=False).add_to(map_obj)
+                    
                 
                     # Display map
                     st_folium(map_obj, width=None, height=600, returned_objects=[])
@@ -1304,60 +1286,297 @@ try:
                     **🗺️ Map Legend:**
                     - 🟠 **Orange circles** = Contaminated sample locations
                     - 🔵 **Blue lines** = Upstream flow paths (hydrological connections)
-                    - 🏭 **Colored markers** = Upstream facilities (grouped by industry type)
-                    - 📍 **Boundary outline** = Selected region (red=subdivision, gray=county, if available)
-                    - Click markers for details | Use layer control (top right) to toggle layers
+                    - 🏭 **Colored markers** = Upstream facilities (grouped by industry type, sorted by count)
+                    - 📍 **Boundary outline** = Selected region
+                    - **Use "✅ ALL FACILITIES" to show/hide all facilities at once.**
+                    - **Uncheck "✅ ALL FACILITIES" to hide everything.**
+                    - **Check "✅ ALL FACILITIES" to allow individual industries to show.**
                     """)
         
-            # Summary of the complete analysis
-            st.markdown("---")
-            st.markdown("### 📊 Analysis Summary")
-        
-            summary_text = []
-            if samples_df is not None and not samples_df.empty:
-                summary_text.append(f"✅ Found **{len(samples_df)}** contaminated samples")
-            
-                if upstream_s2_df is not None and not upstream_s2_df.empty:
-                    summary_text.append(f"✅ Traced **{len(upstream_s2_df)}** upstream flow paths")
-                
-                    if facilities_df is not None and not facilities_df.empty:
-                        summary_text.append(f"✅ Identified **{len(facilities_df)}** potential source facilities")
-                        if 'industryName' in facilities_df.columns:
-                            top_industry = facilities_df['industryName'].value_counts().iloc[0]
-                            summary_text.append(f"🏭 Most common industry type: **{facilities_df['industryName'].value_counts().index[0]}** ({top_industry} facilities)")
-                    else:
-                        summary_text.append("ℹ️ No facilities found in upstream areas")
-                else:
-                    summary_text.append("ℹ️ No upstream sources identified")
-            else:
-                summary_text.append("⚠️ No contaminated samples found with the selected criteria")
-                summary_text.append("💡 Try: wider concentration range, different substance, or different region")
-        
-            for text in summary_text:
-                st.write(text)
     elif query_number == 2:
         # SAMPLES NEAR FACILITIES QUERY
-        st.subheader("🏭 Query 2: Samples Near Facilities")
         st.markdown("""
-        **What this query does:**
-        - Find contaminated water samples in a specific region
-        - Identify nearby industrial facilities of specific types
-        - Analyze spatial proximity between contamination and facilities
+        **What this analysis does:**
+        - Find all facilities of a specific industry type in your region
+        - Expand search to neighboring areas (S2 cells)
+        - Identify contaminated samples near those facilities
         
-        **Use case:** Determine if contamination exists near specific industries (e.g., airports, manufacturing plants)
+        **Use case:** Determine if PFAS contamination exists near specific industries (e.g., sewage treatment, landfills, manufacturing)
         """)
         
-        st.info("🚧 This query type is coming soon! Stay tuned for updates.")
+        # Initialize session state for Query 2 specific params
+        if 'q2_conc_min' not in st.session_state:
+            st.session_state.q2_conc_min = 0
+        if 'q2_conc_max' not in st.session_state:
+            st.session_state.q2_conc_max = 100
         
-        # Placeholder for future implementation
-        with st.expander("Preview: What parameters will be available"):
-            st.markdown("""
-            - **Geographic Region**: State, County, Subdivision
-            - **Facility Types**: Airport, Manufacturing, Chemical Plants, etc.
-            - **Distance Radius**: How close facilities must be to samples
-            - **PFAS Substance**: Optional filter for specific compounds
-            - **Concentration Threshold**: Minimum contamination level
-            """)
+        # --- SIDEBAR PARAMETERS FOR QUERY 2 ---
+        st.sidebar.markdown("### 🏭 Query Parameters")
+        
+        # Wrap parameters in a form to prevent immediate reruns
+        with st.sidebar.form(key="query2_params_form"):
+            st.markdown("### 🏭 Industry Type")
+            
+            # Create display options for dropdown
+            industry_options = {f"{code} - {name}": code for code, name in NAICS_INDUSTRIES.items()}
+            selected_industry_display = st.selectbox(
+                "Select Facility Type",
+                options=list(industry_options.keys()),
+                index=1,  # Default to Sewage Treatment
+                help="Select the NAICS industry code for the type of facilities you want to analyze"
+            )
+            selected_naics_code = industry_options[selected_industry_display]
+            
+            st.markdown("---")
+            
+            # Concentration Range (same as Query 1)
+            st.markdown("### 📊 Concentration Range")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                q2_min_concentration = st.number_input(
+                    "Min (ng/L)",
+                    min_value=0,
+                    max_value=500,
+                    value=st.session_state.q2_conc_min,
+                    step=1,
+                    key="q2_min_conc_input",
+                    help="Minimum concentration in nanograms per liter"
+                )
+                st.session_state.q2_conc_min = q2_min_concentration
+            
+            with col2:
+                q2_max_concentration = st.number_input(
+                    "Max (ng/L)",
+                    min_value=0,
+                    max_value=500,
+                    value=st.session_state.q2_conc_max,
+                    step=1,
+                    key="q2_max_conc_input",
+                    help="Maximum concentration in nanograms per liter"
+                )
+                st.session_state.q2_conc_max = q2_max_concentration
+            
+            # Slider for visual adjustment
+            st.slider(
+                "Drag to adjust range",
+                min_value=0,
+                max_value=500,
+                value=(st.session_state.q2_conc_min, st.session_state.q2_conc_max),
+                step=1,
+                key="q2_concentration_slider",
+                help="Drag the slider or use the number inputs above"
+            )
+            
+            # Validate range
+            if q2_min_concentration > q2_max_concentration:
+                st.warning("⚠️ Min cannot be greater than max")
+            
+            # Show concentration context
+            if q2_max_concentration <= 10:
+                st.info("🟢 Low range - background levels")
+            elif q2_max_concentration <= 70:
+                st.info("🟡 Moderate range - measurable contamination")
+            else:
+                st.warning("🔴 High range - significant concern")
+            
+            st.markdown("---")
+            
+            # Execute button (same style as Query 1)
+            execute_q2 = st.form_submit_button(
+                "🔍 Execute Query",
+                type="primary",
+                use_container_width=True,
+                help="Execute the nearby facilities analysis"
+            )
+        
+        # Determine region code for query
+        region_code_q2 = None
+        if selected_state_code:
+            if selected_subdivision_code:
+                region_code_q2 = str(selected_subdivision_code)
+            elif selected_county_code:
+                region_code_q2 = selected_county_code
+            else:
+                region_code_q2 = str(selected_state_code).zfill(2)
+        
+        # Execute the query when form is submitted
+        if execute_q2:
+            if not selected_state_code:
+                st.error("❌ Please select a state in the sidebar first!")
+            else:
+                with st.spinner(f"Searching for samples near {selected_industry_display}..."):
+                    # Execute the consolidated analysis (single query)
+                    facilities_df, samples_df = execute_nearby_analysis(
+                        naics_code=selected_naics_code,
+                        region_code=region_code_q2,
+                        min_concentration=q2_min_concentration,
+                        max_concentration=q2_max_concentration
+                    )
+                    
+                    # Store results in session state
+                    st.session_state['q2_facilities'] = facilities_df
+                    st.session_state['q2_samples'] = samples_df
+                    st.session_state['q2_industry'] = selected_industry_display
+                    st.session_state['q2_region_code'] = region_code_q2
+                    st.session_state['q2_executed'] = True
+        
+        # Display Results
+        if st.session_state.get('q2_executed', False):
+            facilities_df = st.session_state.get('q2_facilities', pd.DataFrame())
+            samples_df = st.session_state.get('q2_samples', pd.DataFrame())
+            industry_display = st.session_state.get('q2_industry', '')
+            
+            st.markdown("---")
+            st.markdown("### 📊 Results")
+            
+            # Metrics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("🏭 Facilities Found", len(facilities_df))
+            with col2:
+                st.metric("🧪 Contaminated Samples", len(samples_df))
+            
+            # Results tabs
+            if not facilities_df.empty or not samples_df.empty:
+                tab1, tab2, tab3 = st.tabs(["🗺️ Map", "🏭 Facilities", "🧪 Samples"])
+                
+                with tab1:
+                    # Create map
+                    if not facilities_df.empty and 'facWKT' in facilities_df.columns:
+                        st.markdown("#### Interactive Map")
+                        
+                        # Convert to GeoDataFrames
+                        try:
+                            facilities_gdf = facilities_df.copy()
+                            facilities_gdf['geometry'] = facilities_gdf['facWKT'].apply(wkt.loads)
+                            facilities_gdf = gpd.GeoDataFrame(facilities_gdf, geometry='geometry', crs='EPSG:4326')
+                            
+                            # Get center point
+                            center_lat = facilities_gdf.geometry.centroid.y.mean()
+                            center_lon = facilities_gdf.geometry.centroid.x.mean()
+                            
+                            # Create map
+                            map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+                            
+                            # Add region boundary if available
+                            query_region_code = st.session_state.get('q2_region_code')
+                            if query_region_code:
+                                region_boundary_df = get_region_boundary(query_region_code)
+                                if region_boundary_df is not None and not region_boundary_df.empty:
+                                    boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
+                                    boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
+                                    boundary_gdf = gpd.GeoDataFrame(
+                                        index=[0], crs="EPSG:4326", 
+                                        geometry=[wkt.loads(boundary_wkt)]
+                                    )
+                                    
+                                    # Determine boundary color based on region type
+                                    region_code_len = len(str(query_region_code))
+                                    if region_code_len > 5:
+                                        boundary_color = '#FF0000'  # Red for subdivision
+                                        region_type = "Subdivision"
+                                    elif region_code_len == 5:
+                                        boundary_color = '#666666'  # Gray for county
+                                        region_type = "County"
+                                    else:
+                                        boundary_color = '#000000'  # Black for state
+                                        region_type = "State"
+                                    
+                                    folium.GeoJson(
+                                        boundary_gdf.to_json(),
+                                        name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
+                                        style_function=lambda x, color=boundary_color: {
+                                            'fillColor': '#ffffff00',
+                                            'color': color,
+                                            'weight': 3,
+                                            'fillOpacity': 0.0
+                                        }
+                                    ).add_to(map_obj)
+                            
+                            # Add facilities (blue markers)
+                            facilities_gdf.explore(
+                                m=map_obj,
+                                name=f'<span style="color:Blue;">🏭 {industry_display} ({len(facilities_gdf)})</span>',
+                                color='Blue',
+                                marker_kwds=dict(radius=8),
+                                popup=['facilityName', 'industryName'] if 'facilityName' in facilities_gdf.columns else True,
+                                show=True
+                            )
+                            
+                            # Add samples if available (orange markers)
+                            if not samples_df.empty and 'spWKT' in samples_df.columns:
+                                samples_gdf = samples_df.copy()
+                                samples_gdf['geometry'] = samples_gdf['spWKT'].apply(wkt.loads)
+                                samples_gdf = gpd.GeoDataFrame(samples_gdf, geometry='geometry', crs='EPSG:4326')
+                                
+                                samples_gdf.explore(
+                                    m=map_obj,
+                                    name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_gdf)})</span>',
+                                    color='DarkOrange',
+                                    marker_kwds=dict(radius=6),
+                                    popup=['substances', 'materials', 'maxConcentration'] if all(c in samples_gdf.columns for c in ['substances', 'materials']) else True,
+                                    show=True
+                                )
+                            
+                            # Add layer control
+                            folium.LayerControl(collapsed=False).add_to(map_obj)
+                            
+                            # Display map
+                            st_folium(map_obj, width=None, height=600, returned_objects=[])
+                            
+                            st.info("""
+                            **🗺️ Map Legend:**
+                            - 📍 **Boundary** = Selected region (black=state, gray=county, red=subdivision)
+                            - 🔵 **Blue markers** = Facilities of selected industry type
+                            - 🟠 **Orange markers** = Contaminated sample points nearby
+                            """)
+                            
+                        except Exception as e:
+                            st.error(f"Error creating map: {e}")
+                    else:
+                        st.warning("No facility location data available for mapping")
+                
+                with tab2:
+                    if not facilities_df.empty:
+                        st.markdown(f"#### 🏭 {industry_display}")
+                        
+                        # Select display columns
+                        display_cols = [c for c in ['facilityName', 'industryName', 'facility'] if c in facilities_df.columns]
+                        if display_cols:
+                            st.dataframe(facilities_df[display_cols], use_container_width=True)
+                        else:
+                            st.dataframe(facilities_df, use_container_width=True)
+                    else:
+                        st.info("No facilities found matching the criteria")
+                
+                with tab3:
+                    if not samples_df.empty:
+                        st.markdown("#### 🧪 Contaminated Sample Points")
+                        
+                        # Select display columns
+                        display_cols = [c for c in ['maxConcentration', 'substances', 'materials', 'resultCount', 'sp'] if c in samples_df.columns]
+                        if display_cols:
+                            st.dataframe(samples_df[display_cols], use_container_width=True)
+                        else:
+                            st.dataframe(samples_df, use_container_width=True)
+                        
+                        # Summary statistics
+                        if 'maxConcentration' in samples_df.columns:
+                            st.markdown("##### 📈 Concentration Statistics")
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Max (ng/L)", f"{samples_df['maxConcentration'].max():.2f}")
+                            with col2:
+                                st.metric("Mean (ng/L)", f"{samples_df['maxConcentration'].mean():.2f}")
+                            with col3:
+                                st.metric("Median (ng/L)", f"{samples_df['maxConcentration'].median():.2f}")
+                    else:
+                        st.info("No contaminated samples found near the selected facilities")
+            else:
+                st.warning("No results found. Try a different industry type or region.")
+        else:
+            st.info("👈 Select parameters in the sidebar and click 'Find Samples Near Facilities' to run the analysis")
 
     elif query_number == 3:
         # REGIONAL CONTAMINATION OVERVIEW
@@ -1408,3 +1627,4 @@ except Exception as e:
     import traceback
     with st.expander("Show error details"):
         st.code(traceback.format_exc())
+
