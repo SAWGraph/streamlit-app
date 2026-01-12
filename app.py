@@ -61,7 +61,7 @@ ENDPOINT_URLS = {
 # Page configuration
 st.set_page_config(
     page_title="SAWGraph PFAS Explorer",
-    page_icon="💧",
+    page_icon="assets/Sawgraph-Logo-transparent.png",
     layout="wide",
     initial_sidebar_state="expanded"
 )

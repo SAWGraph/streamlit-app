@@ -5,9 +5,14 @@ SPARQL queries to filter substances based on available observations in a region
 import pandas as pd
 import requests
 from typing import List, Optional
+from functools import lru_cache
 
 # SPARQL Endpoint
 FEDERATION_ENDPOINT = "https://frink.apps.renci.org/federation/sparql"
+COMPTox_DSS_TOX_ENDPOINT = (
+    "https://comptox.epa.gov/dashboard-api/ccdapp2/chemical-detail/search/by-dsstoxsid"
+)
+DSSTOX_URI_PREFIX = "http://w3id.org/DSSTox/v1/DTXSID"
 
 
 def parse_sparql_results(results: dict) -> pd.DataFrame:
@@ -54,6 +59,32 @@ def execute_sparql_query(query: str, timeout: int = 60) -> Optional[dict]:
 
 def _fallback_substance_name(substance_uri: str) -> str:
     return substance_uri.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _extract_dsstox_id(substance_uri: str) -> Optional[str]:
+    if substance_uri.startswith(DSSTOX_URI_PREFIX):
+        return _fallback_substance_name(substance_uri)
+    return None
+
+
+@lru_cache(maxsize=2048)
+def _fetch_comptox_label(dsstox_id: str) -> Optional[str]:
+    try:
+        response = requests.get(
+            COMPTox_DSS_TOX_ENDPOINT,
+            params={"id": dsstox_id},
+            timeout=10
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+    except Exception:
+        return None
+
+    label = data.get("label") or data.get("preferredName")
+    if not isinstance(label, str) or not label.strip():
+        return None
+    return label.strip()
 
 
 def get_available_substances_with_labels(
@@ -124,10 +155,19 @@ SELECT DISTINCT ?substance ?label WHERE {{
     df = df.sort_values("has_label", ascending=False)
     df = df.drop_duplicates(subset=["substance"], keep="first")
     df["display_name"] = df["label"]
-    df["display_name"] = df["display_name"].where(
-        df["display_name"].notna(),
-        df["substance"].apply(_fallback_substance_name),
-    )
+    df["dsstox_id"] = df["substance"].apply(_extract_dsstox_id)
+
+    def _resolve_display_name(row: pd.Series) -> str:
+        if pd.notna(row["display_name"]):
+            return row["display_name"]
+        dsstox_id = row.get("dsstox_id")
+        if isinstance(dsstox_id, str) and dsstox_id:
+            comptox_label = _fetch_comptox_label(dsstox_id)
+            if comptox_label:
+                return comptox_label
+        return _fallback_substance_name(row["substance"])
+
+    df["display_name"] = df.apply(_resolve_display_name, axis=1)
     return df[["substance", "display_name"]].reset_index(drop=True)
 
 
