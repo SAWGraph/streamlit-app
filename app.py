@@ -2498,6 +2498,7 @@ try:
             if not selected_state_code:
                 st.error("❌ Please select a state in the sidebar first!")
             else:
+                region_boundary_df = None
                 with st.spinner(f"Searching for samples near {selected_industry_display}..."):
                     # Execute the consolidated analysis (single query)
                     facilities_df, samples_df = execute_nearby_analysis(
@@ -2507,6 +2508,8 @@ try:
                         max_concentration=q2_max_concentration,
                         include_nondetects=include_nondetects
                     )
+                    if region_code_q2:
+                        region_boundary_df = get_region_boundary(region_code_q2)
                     
                     # Store results in session state
                     st.session_state['q2_facilities'] = facilities_df
@@ -2517,6 +2520,7 @@ try:
                         code: pfas_industries.get(code, code) for code in selected_naics_codes
                     }
                     st.session_state['q2_region_code'] = region_code_q2
+                    st.session_state['q2_region_boundary_df'] = region_boundary_df
                     st.session_state['q2_range_used'] = (q2_min_concentration, q2_max_concentration)
                     st.session_state['q2_executed'] = True
         
@@ -2525,6 +2529,7 @@ try:
             facilities_df = st.session_state.get('q2_facilities', pd.DataFrame())
             samples_df = st.session_state.get('q2_samples', pd.DataFrame())
             industry_display = st.session_state.get('q2_industry', '')
+            region_boundary_df = st.session_state.get('q2_region_boundary_df')
             
             st.markdown("---")
             st.markdown("### 📊 Results")
@@ -2567,38 +2572,36 @@ try:
                             
                             # Add region boundary if available
                             query_region_code = st.session_state.get('q2_region_code')
-                            if query_region_code:
-                                region_boundary_df = get_region_boundary(query_region_code)
-                                if region_boundary_df is not None and not region_boundary_df.empty:
-                                    boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
-                                    boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
-                                    boundary_gdf = gpd.GeoDataFrame(
-                                        index=[0], crs="EPSG:4326", 
-                                        geometry=[wkt.loads(boundary_wkt)]
-                                    )
-                                    
-                                    # Determine boundary color based on region type
-                                    region_code_len = len(str(query_region_code))
-                                    if region_code_len > 5:
-                                        boundary_color = '#FF0000'  # Red for subdivision
-                                        region_type = "Subdivision"
-                                    elif region_code_len == 5:
-                                        boundary_color = '#666666'  # Gray for county
-                                        region_type = "County"
-                                    else:
-                                        boundary_color = '#000000'  # Black for state
-                                        region_type = "State"
-                                    
-                                    folium.GeoJson(
-                                        boundary_gdf.to_json(),
-                                        name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
-                                        style_function=lambda x, color=boundary_color: {
-                                            'fillColor': '#ffffff00',
-                                            'color': color,
-                                            'weight': 3,
-                                            'fillOpacity': 0.0
-                                        }
-                                    ).add_to(map_obj)
+                            if region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
+                                boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
+                                boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
+                                boundary_gdf = gpd.GeoDataFrame(
+                                    index=[0], crs="EPSG:4326", 
+                                    geometry=[wkt.loads(boundary_wkt)]
+                                )
+                                
+                                # Determine boundary color based on region type
+                                region_code_len = len(str(query_region_code))
+                                if region_code_len > 5:
+                                    boundary_color = '#FF0000'  # Red for subdivision
+                                    region_type = "Subdivision"
+                                elif region_code_len == 5:
+                                    boundary_color = '#666666'  # Gray for county
+                                    region_type = "County"
+                                else:
+                                    boundary_color = '#000000'  # Black for state
+                                    region_type = "State"
+                                
+                                folium.GeoJson(
+                                    boundary_gdf.to_json(),
+                                    name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
+                                    style_function=lambda x, color=boundary_color: {
+                                        'fillColor': '#ffffff00',
+                                        'color': color,
+                                        'weight': 3,
+                                        'fillOpacity': 0.0
+                                    }
+                                ).add_to(map_obj)
                             
                             # Add facilities (blue markers)
                             selected_codes = st.session_state.get("q2_industry_codes", [])
@@ -2798,15 +2801,19 @@ try:
         )
 
         if execute_sockg:
+            region_boundary_df = None
             with st.spinner("Running SOCKG queries..."):
                 sites_df = get_sockg_locations_cached(selected_state_code)
                 facilities_df = get_sockg_facilities_cached(selected_state_code)
+                if selected_state_code:
+                    region_boundary_df = get_region_boundary(selected_state_code)
 
             st.session_state.sockg_results = {
                 "sites_df": sites_df,
                 "facilities_df": facilities_df,
                 "selected_state_name": selected_state_name,
                 "selected_state_code": selected_state_code,
+                "region_boundary_df": region_boundary_df,
             }
             st.session_state.sockg_has_results = True
 
@@ -2815,6 +2822,7 @@ try:
             sites_df = results.get("sites_df", pd.DataFrame())
             facilities_df = results.get("facilities_df", pd.DataFrame())
             state_name = results.get("selected_state_name")
+            region_boundary_df = results.get("region_boundary_df")
 
             st.markdown("---")
             st.markdown("### 📊 Results")
@@ -2917,27 +2925,24 @@ try:
                                     show=True,
                                 )
 
-                        selected_state_code = results.get("selected_state_code")
-                        if selected_state_code:
-                            region_boundary_df = get_region_boundary(selected_state_code)
-                            if region_boundary_df is not None and not region_boundary_df.empty:
-                                boundary_wkt = region_boundary_df.iloc[0]["countyWKT"]
-                                boundary_name = region_boundary_df.iloc[0].get("countyName", "State")
-                                boundary_gdf = gpd.GeoDataFrame(
-                                    index=[0],
-                                    crs="EPSG:4326",
-                                    geometry=[wkt.loads(boundary_wkt)]
-                                )
-                                folium.GeoJson(
-                                    boundary_gdf.to_json(),
-                                    name=f'<span style="color:#444444;">📍 {boundary_name} Boundary</span>',
-                                    style_function=lambda x: {
-                                        "fillColor": "#ffffff00",
-                                        "color": "#444444",
-                                        "weight": 3,
-                                        "fillOpacity": 0.0,
-                                    },
-                                ).add_to(map_obj)
+                        if region_boundary_df is not None and not region_boundary_df.empty:
+                            boundary_wkt = region_boundary_df.iloc[0]["countyWKT"]
+                            boundary_name = region_boundary_df.iloc[0].get("countyName", "State")
+                            boundary_gdf = gpd.GeoDataFrame(
+                                index=[0],
+                                crs="EPSG:4326",
+                                geometry=[wkt.loads(boundary_wkt)]
+                            )
+                            folium.GeoJson(
+                                boundary_gdf.to_json(),
+                                name=f'<span style="color:#444444;">📍 {boundary_name} Boundary</span>',
+                                style_function=lambda x: {
+                                    "fillColor": "#ffffff00",
+                                    "color": "#444444",
+                                    "weight": 3,
+                                    "fillOpacity": 0.0,
+                                },
+                            ).add_to(map_obj)
 
                         folium.LayerControl(collapsed=False).add_to(map_obj)
                         st_folium(map_obj, width=None, height=600, returned_objects=[])

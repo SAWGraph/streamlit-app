@@ -160,6 +160,7 @@ def main(context: AnalysisContext) -> None:
         elif not selected_naics_code:
             st.error("❌ Please select an industry type first!")
         else:
+            region_boundary_df = None
             with st.spinner(f"Searching for samples near {selected_industry_display}..."):
                 # Execute the consolidated analysis (single query)
                 facilities_df, samples_df = execute_nearby_analysis(
@@ -169,12 +170,14 @@ def main(context: AnalysisContext) -> None:
                     max_concentration=max_concentration,
                     include_nondetects=include_nondetects
                 )
+                region_boundary_df = get_region_boundary(context.region_code)
                 
                 # Store results in session state
                 st.session_state[facilities_key] = facilities_df
                 st.session_state[samples_key] = samples_df
                 st.session_state[industry_key] = selected_industry_display
                 st.session_state[region_code_key] = context.region_code
+                st.session_state[f"{analysis_key}_region_boundary_df"] = region_boundary_df
                 st.session_state[executed_key] = True
     
     # Display Results
@@ -182,6 +185,7 @@ def main(context: AnalysisContext) -> None:
         facilities_df = st.session_state.get(facilities_key, pd.DataFrame())
         samples_df = st.session_state.get(samples_key, pd.DataFrame())
         industry_display = st.session_state.get(industry_key, '')
+        region_boundary_df = st.session_state.get(f"{analysis_key}_region_boundary_df")
         
         st.markdown("---")
         st.markdown("### 📊 Results")
@@ -217,38 +221,36 @@ def main(context: AnalysisContext) -> None:
                         
                         # Add region boundary if available
                         query_region_code = st.session_state.get(region_code_key)
-                        if query_region_code:
-                            region_boundary_df = get_region_boundary(query_region_code)
-                            if region_boundary_df is not None and not region_boundary_df.empty:
-                                boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
-                                boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
-                                boundary_gdf = gpd.GeoDataFrame(
-                                    index=[0], crs="EPSG:4326", 
-                                    geometry=[wkt.loads(boundary_wkt)]
-                                )
-                                
-                                # Determine boundary color based on region type
-                                region_code_len = len(str(query_region_code))
-                                if region_code_len > 5:
-                                    boundary_color = '#FF0000'  # Red for subdivision
-                                    region_type = "Subdivision"
-                                elif region_code_len == 5:
-                                    boundary_color = '#666666'  # Gray for county
-                                    region_type = "County"
-                                else:
-                                    boundary_color = '#000000'  # Black for state
-                                    region_type = "State"
-                                
-                                folium.GeoJson(
-                                    boundary_gdf.to_json(),
-                                    name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
-                                    style_function=lambda x, color=boundary_color: {
-                                        'fillColor': '#ffffff00',
-                                        'color': color,
-                                        'weight': 3,
-                                        'fillOpacity': 0.0
-                                    }
-                                ).add_to(map_obj)
+                        if region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
+                            boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
+                            boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
+                            boundary_gdf = gpd.GeoDataFrame(
+                                index=[0], crs="EPSG:4326", 
+                                geometry=[wkt.loads(boundary_wkt)]
+                            )
+                            
+                            # Determine boundary color based on region type
+                            region_code_len = len(str(query_region_code))
+                            if region_code_len > 5:
+                                boundary_color = '#FF0000'  # Red for subdivision
+                                region_type = "Subdivision"
+                            elif region_code_len == 5:
+                                boundary_color = '#666666'  # Gray for county
+                                region_type = "County"
+                            else:
+                                boundary_color = '#000000'  # Black for state
+                                region_type = "State"
+                            
+                            folium.GeoJson(
+                                boundary_gdf.to_json(),
+                                name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
+                                style_function=lambda x, color=boundary_color: {
+                                    'fillColor': '#ffffff00',
+                                    'color': color,
+                                    'weight': 3,
+                                    'fillOpacity': 0.0
+                                }
+                            ).add_to(map_obj)
                         
                         # Add facilities (blue markers)
                         facilities_gdf.explore(

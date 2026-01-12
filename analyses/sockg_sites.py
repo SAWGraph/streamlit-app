@@ -62,14 +62,20 @@ def main(context: AnalysisContext) -> None:
     )
 
     if execute:
+        region_boundary_df = None
         with st.spinner("Running SOCKG queries..."):
             sites_df = get_sockg_locations(selected_state_code)
             facilities_df = get_sockg_facilities(selected_state_code)
+            if selected_state_code:
+                from utils.sparql_helpers import get_region_boundary
+                region_boundary_df = get_region_boundary(selected_state_code)
 
         st.session_state[f"{context.analysis_key}_results"] = {
             "sites_df": sites_df,
             "facilities_df": facilities_df,
             "selected_state_name": selected_state_name,
+            "selected_state_code": selected_state_code,
+            "region_boundary_df": region_boundary_df,
         }
         st.session_state[f"{context.analysis_key}_has_results"] = True
 
@@ -81,6 +87,7 @@ def main(context: AnalysisContext) -> None:
     sites_df = results.get("sites_df", pd.DataFrame())
     facilities_df = results.get("facilities_df", pd.DataFrame())
     state_label = results.get("selected_state_name") or "All SOCKG states"
+    region_boundary_df = results.get("region_boundary_df")
 
     st.markdown("---")
     st.markdown("### 📊 Results")
@@ -189,27 +196,24 @@ def main(context: AnalysisContext) -> None:
                     show=True,
                 )
 
-        if selected_state_code:
-            from utils.sparql_helpers import get_region_boundary
-            region_boundary_df = get_region_boundary(selected_state_code)
-            if region_boundary_df is not None and not region_boundary_df.empty:
-                boundary_wkt = region_boundary_df.iloc[0]["countyWKT"]
-                boundary_name = region_boundary_df.iloc[0].get("countyName", "State")
-                boundary_gdf = gpd.GeoDataFrame(
-                    index=[0],
-                    crs="EPSG:4326",
-                    geometry=[wkt.loads(boundary_wkt)]
-                )
-                folium.GeoJson(
-                    boundary_gdf.to_json(),
-                    name=f'<span style="color:#444444;">📍 {boundary_name} Boundary</span>',
-                    style_function=lambda x: {
-                        "fillColor": "#ffffff00",
-                        "color": "#444444",
-                        "weight": 3,
-                        "fillOpacity": 0.0,
-                    },
-                ).add_to(map_obj)
+        if region_boundary_df is not None and not region_boundary_df.empty:
+            boundary_wkt = region_boundary_df.iloc[0]["countyWKT"]
+            boundary_name = region_boundary_df.iloc[0].get("countyName", "State")
+            boundary_gdf = gpd.GeoDataFrame(
+                index=[0],
+                crs="EPSG:4326",
+                geometry=[wkt.loads(boundary_wkt)]
+            )
+            folium.GeoJson(
+                boundary_gdf.to_json(),
+                name=f'<span style="color:#444444;">📍 {boundary_name} Boundary</span>',
+                style_function=lambda x: {
+                    "fillColor": "#ffffff00",
+                    "color": "#444444",
+                    "weight": 3,
+                    "fillOpacity": 0.0,
+                },
+            ).add_to(map_obj)
 
         folium.LayerControl(collapsed=False).add_to(map_obj)
         st_folium(map_obj, width=None, height=600, returned_objects=[])
