@@ -3,6 +3,7 @@ Shared SPARQL connection and query utilities
 """
 import pandas as pd
 import rdflib
+import requests
 from SPARQLWrapper import SPARQLWrapper2, JSON, POST, DIGEST
 
 
@@ -11,7 +12,8 @@ ENDPOINTS = {
     'sawgraph': "https://frink.apps.renci.org/sawgraph/sparql",
     'spatial': "https://frink.apps.renci.org/spatialkg/sparql",
     'hydrology': "https://frink.apps.renci.org/hydrologykg/sparql",
-    'fio': "https://frink.apps.renci.org/fiokg/sparql"
+    'fio': "https://frink.apps.renci.org/fiokg/sparql",
+    'federation': "https://frink.apps.renci.org/federation/sparql"
 }
 
 
@@ -106,4 +108,91 @@ LIMIT 10
         return True, f"✅ Connected to {endpoint_name} successfully!", df
     except Exception as e:
         return False, f"❌ Connection failed: {str(e)}", None
+
+
+def parse_sparql_results(results):
+    """
+    Convert SPARQL JSON results to DataFrame
+
+    Args:
+        results: SPARQL JSON response with 'head' and 'results' keys
+
+    Returns:
+        pandas DataFrame
+    """
+    variables = results['head']['vars']
+    bindings = results['results']['bindings']
+
+    data = []
+    for binding in bindings:
+        row = {}
+        for var in variables:
+            if var in binding:
+                row[var] = binding[var]['value']
+            else:
+                row[var] = None
+        data.append(row)
+
+    return pd.DataFrame(data)
+
+
+def get_region_boundary(region_code):
+    """
+    Query the boundary geometry for a given administrative region.
+
+    Args:
+        region_code: FIPS code as string (2 digits=state, 5=county, >5=subdivision)
+
+    Returns:
+        DataFrame with columns: county (region URI), countyWKT (geometry), countyName (label)
+        Returns None if query fails or no results
+    """
+    # Determine query pattern based on region code length
+    if len(str(region_code)) > 5:
+        # Subdivision - use DataCommons URI
+        region_uri_pattern = f"VALUES ?county {{<https://datacommons.org/browser/geoId/{region_code}>}}"
+    else:
+        # State or County - use KWG URI
+        region_uri_pattern = f"VALUES ?county {{kwgr:administrativeRegion.USA.{region_code}}}"
+
+    query = f"""
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT * WHERE {{
+    ?county geo:hasGeometry/geo:asWKT ?countyWKT ;
+            rdfs:label ?countyName.
+    {region_uri_pattern}
+}}
+"""
+
+    sparql_endpoint = ENDPOINTS["federation"]
+    headers = {
+        "Accept": "application/sparql-results+json",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    try:
+        response = requests.post(
+            sparql_endpoint,
+            data={"query": query},
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            results = response.json()
+            df = parse_sparql_results(results)
+            if not df.empty:
+                return df
+            else:
+                return None
+        else:
+            return None
+
+    except Exception as e:
+        print(f"Error querying boundary: {str(e)}")
+        return None
 

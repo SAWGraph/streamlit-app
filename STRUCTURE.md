@@ -1,18 +1,44 @@
-# SAWGraph PFAS Analysis - Multi-Page App Structure
+# SAWGraph PFAS Explorer - Application Structure
 
 ## 📁 Directory Structure
 
 ```
 streamlit/
-├── app.py                          # Home page - landing, navigation, connection tests
-├── pages/                          # Analysis pages (auto-discovered by Streamlit)
-│   ├── 1_🔍_PFAS_Upstream_Analysis.py   # Your original analysis
-│   └── _template.py                # Template for new pages
-├── utils/                          # Shared utilities
-│   ├── __init__.py
-│   └── sparql_helpers.py           # SPARQL connection & query helpers
+├── app.py                          # Main application entry point (single-page app)
+├── analysis_registry.py            # Centralized analysis configuration
 ├── requirements.txt
-└── README.md
+├── README.md
+│
+├── analyses/                       # Analysis modules (one per analysis type)
+│   ├── __init__.py
+│   ├── pfas_upstream.py            # Upstream tracing analysis
+│   ├── pfas_downstream.py          # Downstream tracing analysis
+│   ├── samples_near_facilities.py  # Samples near facilities analysis
+│   ├── regional_overview.py        # Regional contamination overview
+│   └── facility_risk.py            # Facility risk assessment (stub)
+│
+├── components/                     # Reusable UI components
+│   ├── __init__.py
+│   └── start_page.py               # Landing page with logo and intro
+│
+├── utils/                          # Shared utilities and query builders
+│   ├── __init__.py
+│   ├── sparql_helpers.py           # SPARQL connection & query helpers
+│   ├── upstream_tracing_queries.py # Upstream SPARQL query builders
+│   ├── downstream_tracing_queries.py # Downstream SPARQL query builders
+│   ├── nearby_queries.py           # Nearby facilities query builders
+│   ├── region_filters.py           # Geographic region filtering
+│   ├── substance_filters.py        # PFAS substance filtering
+│   ├── material_filters.py         # Sample material type filtering
+│   └── ui_components.py            # Shared UI widgets
+│
+├── data/                           # Static data files
+│   ├── pfas_substances.csv         # PFAS substance definitions
+│   ├── sample_material_types.csv   # Material type definitions
+│   └── us_administrative_regions_fips.csv  # US FIPS codes for regions
+│
+└── assets/                         # Static assets
+    └── Sawgraph-Logo-transparent.png  # SAWGraph project logo
 ```
 
 ## 🚀 How to Run
@@ -22,104 +48,128 @@ streamlit run app.py
 ```
 
 The app will open in your browser with:
-- **Home page**: Overview, connection tests, quick start guide
-- **Sidebar navigation**: Automatically includes all pages from `pages/` directory
+- **Landing page**: SAWGraph logo, project description, getting started guide
+- **Sidebar**: Analysis type selector, geographic region filters, analysis-specific parameters
 
-## ➕ Adding New Query Pages
+## 🏗️ Architecture
 
-1. **Copy the template**:
-   ```bash
-   cp pages/_template.py "pages/2_🌊_Your_New_Analysis.py"
+### Single-Page App with Analysis Registry
+
+The app uses a **registry pattern** to manage analyses:
+
+1. **`analysis_registry.py`**: Defines all available analyses with metadata
+2. **`app.py`**: Main entry point that:
+   - Loads shared data (FIPS codes, substances, material types)
+   - Renders the sidebar with analysis selector and region filters
+   - Dispatches to the selected analysis module
+3. **`analyses/*.py`**: Individual analysis modules with `main(context)` functions
+
+### AnalysisContext
+
+Each analysis receives an `AnalysisContext` object containing:
+
+```python
+@dataclass
+class AnalysisContext:
+    # Shared data (loaded once)
+    states_df: pd.DataFrame
+    counties_df: pd.DataFrame
+    subdivisions_df: pd.DataFrame
+    substances_df: pd.DataFrame
+    material_types_df: pd.DataFrame
+
+    # Region selection
+    selected_state_code: Optional[str]
+    selected_state_name: Optional[str]
+    selected_county_code: Optional[str]
+    selected_county_name: Optional[str]
+    region_code: str      # e.g., "23", "23005", or "2301104475"
+    region_display: str   # e.g., "Maine" or "Penobscot County, Maine"
+
+    # Configuration
+    endpoints: dict       # SPARQL endpoint URLs
+    project_dir: str
+    analysis_key: str     # "upstream", "downstream", etc.
+```
+
+## ➕ Adding New Analyses
+
+1. **Create the analysis module** in `analyses/`:
+   ```python
+   # analyses/my_new_analysis.py
+   from analysis_registry import AnalysisContext
+
+   def main(context: AnalysisContext) -> None:
+       import streamlit as st
+       st.header("My New Analysis")
+       # Your analysis code here
    ```
 
-2. **File naming convention**:
-   - Start with a number (for ordering): `1_`, `2_`, `3_`, etc.
-   - Add an emoji (shows in sidebar): `🔍`, `🌊`, `🏭`, `📊`, etc.
-   - Use underscores for spaces: `My_Analysis`
-   - Example: `2_📊_Water_Quality_Trends.py`
+2. **Register it** in `analysis_registry.py`:
+   ```python
+   AnalysisSpec(
+       key="my_analysis",
+       label="My New Analysis",
+       title="🔬 My New Analysis",
+       description="Description shown in the UI.",
+       query=6,  # Unique query number
+       enabled=True,
+       runner=my_analysis_main,
+   )
+   ```
 
-3. **Edit the new file**:
-   - Update the title and description
-   - Add your parameters in the sidebar
-   - Write your SPARQL query
-   - Customize the results display
+3. **Add lazy import** in `build_registry()`:
+   ```python
+   from analyses.my_new_analysis import main as my_analysis_main
+   ```
 
-4. **Streamlit will automatically**:
-   - Discover the new page
-   - Add it to the sidebar navigation
-   - Handle routing
+## 🔧 Available Analyses
+
+| Key | Label | Status |
+|-----|-------|--------|
+| `upstream` | PFAS Upstream Tracing | ✅ Enabled |
+| `downstream` | PFAS Downstream Tracing | ✅ Enabled |
+| `near_facilities` | Samples Near Facilities | ✅ Enabled |
+| `regional` | Regional Contamination Overview | ✅ Enabled |
+| `risk` | Facility Risk Assessment | ⚠️ Disabled (stub) |
 
 ## 🔧 Shared Utilities
 
 ### `utils/sparql_helpers.py`
 
-Common functions available to all pages:
-
 ```python
 from utils.sparql_helpers import get_sparql_wrapper, convertToDataframe
 
-# Get a configured SPARQL wrapper
-sparql = get_sparql_wrapper('sawgraph')  # or 'spatial', 'hydrology', 'fio'
+sparql = get_sparql_wrapper('sawgraph')
 sparql.setQuery(your_query)
 result = sparql.query()
-
-# Convert results to DataFrame
 df = convertToDataframe(result)
 ```
 
-### Available Endpoints
+### Available SPARQL Endpoints
 
 - `'sawgraph'`: PFAS contamination observations
-- `'spatial'`: Administrative boundaries and spatial relationships  
+- `'spatial'`: Administrative boundaries and spatial relationships
 - `'hydrology'`: Water flow networks (NHDPlus V2)
 - `'fio'`: Industrial facilities (NAICS data)
 
-## 📝 Page Template Structure
+### Filter Utilities
 
-Every analysis page should have:
+- **`region_filters.py`**: Geographic region selection (State → County → Subdivision)
+- **`substance_filters.py`**: PFAS substance multi-select with search
+- **`material_filters.py`**: Sample material type filtering
 
-1. **Imports** (including utils)
-2. **Page config** (`st.set_page_config()`)
-3. **Title & description**
-4. **Sidebar parameters**
-5. **Run button** with query execution
-6. **Results display** (maps, tables, charts)
-7. **Export options** (CSV downloads)
-8. **Info expander** (documentation)
+### Query Builders
 
-## 🎨 Emoji Reference for Pages
-
-- 🔍 Search/Query
-- 🌊 Water/Hydrology
-- 🏭 Facilities/Industrial
-- 📊 Statistics/Charts
-- 🗺️ Maps/Geographic
-- 🔬 Analysis/Science
-- 📈 Trends/Time Series
-- 🎯 Targeted Analysis
-- 🌡️ Measurements/Values
-- ⚠️ Alerts/Warnings
+- **`upstream_tracing_queries.py`**: Build upstream tracing SPARQL queries
+- **`downstream_tracing_queries.py`**: Build downstream tracing SPARQL queries
+- **`nearby_queries.py`**: Build samples-near-facilities queries
 
 ## 💡 Tips
 
-1. **Keep pages focused**: Each page should answer one specific question
-2. **Reuse utilities**: Don't duplicate code - add shared functions to `utils/`
-3. **Test connections**: Use the home page to verify SPARQL endpoints
-4. **Progressive disclosure**: Use expanders for debug info and advanced options
-5. **Clear feedback**: Show progress bars, status messages, and helpful errors
-
-## 🔐 Credentials
-
-Currently using DIGEST authentication with `setHTTPAuth(DIGEST)`.
-If you need to add credentials:
-
-```python
-sparql = get_sparql_wrapper('sawgraph')
-sparql.setCredentials('username', 'password')
-```
-
-Consider storing credentials in:
-- Environment variables
-- `.streamlit/secrets.toml` (don't commit to git!)
-- External config file
+1. **Use the context**: All shared data is pre-loaded in `AnalysisContext`
+2. **Reuse filter utilities**: Use `region_filters`, `substance_filters`, etc.
+3. **Query builders**: Use existing query builder functions for complex SPARQL
+4. **Progressive disclosure**: Use `st.expander()` for debug info and advanced options
+5. **Clear feedback**: Show progress with `st.spinner()` and status messages
 

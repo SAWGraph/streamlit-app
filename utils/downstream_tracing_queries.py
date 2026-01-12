@@ -104,6 +104,7 @@ def execute_downstream_step1_query(
     min_conc: float,
     max_conc: float,
     region_code: str,
+    include_nondetects: bool = False,
     timeout: int = 180,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """

@@ -11,6 +11,7 @@
 streamlit
 streamlit-folium
 streamlit-searchbox
+st-ant-tree
 folium>=0.12
 geopandas
 pandas

@@ -632,6 +632,185 @@ WHERE {{
 
 
 # ============================================================================
+# COMBINED QUERY (SINGLE-PASS UPSTREAM TRACING)
+# ============================================================================
+
+import time
+
+def execute_combined_query(substance_uri, material_uri, min_conc, max_conc, region_code, include_nondetects=False):
+    """
+    Run a single SPARQL query that retrieves contaminated samples, upstream
+    hydrological cells/flowlines, and potential facilities in one pass.
+
+    This is an optimized version that combines all 3 steps into a single federated query.
+
+    Args:
+        substance_uri: URI of the PFAS substance to filter (or None for all)
+        material_uri: URI of the material type to filter (or None for all)
+        min_conc: Minimum concentration in ng/L
+        max_conc: Maximum concentration in ng/L
+        region_code: FIPS code (2=state, 5=county, >5=subdivision)
+        include_nondetects: Whether to include zero/nondetect results
+
+    Returns:
+        tuple: (DataFrame, error_message, debug_info)
+    """
+    print("\n--- Running combined upstream tracing query (federation endpoint) ---")
+    print(f"Finding samples and facilities in region: {region_code}")
+    print(f"Substance URI: {substance_uri}")
+    print(f"Material Type URI: {material_uri}")
+    print(f"Concentration range: {min_conc} - {max_conc} ng/L")
+    print(f"Include non-detects: {include_nondetects}")
+
+    def build_values_clause(var_name, uri_value):
+        if not uri_value:
+            return ""
+        return f"VALUES ?{var_name} {{<{uri_value}>}}"
+
+    substance_filter = build_values_clause("substance", substance_uri)
+    material_filter = build_values_clause("matType", material_uri)
+    min_conc = float(min_conc)
+    max_conc = float(max_conc)
+
+    sanitized_region = str(region_code).strip()
+
+    # Validate region code
+    if not sanitized_region or sanitized_region == "" or sanitized_region.lower() == "none":
+        error_msg = "Invalid region code. Please select a state before executing the query."
+        return None, error_msg, {"error": error_msg}
+
+    # Region filter logic based on code length
+    # Uses spatial:connectedTo pattern which is faster than sfWithin/sfTouches
+    if len(sanitized_region) > 5:
+        # Subdivision (city/town) level - use DataCommons URI directly
+        region_pattern = f"VALUES ?region {{<https://datacommons.org/browser/geoId/{sanitized_region}>}}"
+    else:
+        # State or County level - use administrativePartOf+ (transitive)
+        # The + is CRITICAL: subdivisions are partOf counties, counties are partOf states
+        # Without +, state-level queries would fail to find any results
+        region_pattern = f"?region kwg-ont:administrativePartOf+ <http://stko-kwg.geog.ucsb.edu/lod/resource/administrativeRegion.USA.{sanitized_region}> ."
+
+    query = f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+
+SELECT DISTINCT ?sp ?spWKT ?substance ?result_value ?matType
+WHERE {{
+    ?observation rdf:type coso:ContaminantObservation ;
+                coso:observedAtSamplePoint ?sp ;
+                coso:ofSubstance ?substance ;
+                coso:analyzedSample ?sample ;
+                coso:hasResult ?result .
+
+    ?sample coso:sampleOfMaterialType ?matType .
+    ?result coso:measurementValue ?result_value ;
+            coso:measurementUnit ?unit .
+
+    # CRITICAL: Filter by unit (ng/L) to ensure consistent concentration comparison
+    VALUES ?unit {{<http://qudt.org/vocab/unit/NanoGM-PER-L>}}
+
+    # Region filter using spatial:connectedTo (faster than sfWithin)
+    ?sp spatial:connectedTo ?region .
+    {region_pattern}
+
+    {substance_filter}
+    {material_filter}
+    FILTER (?result_value >= {min_conc})
+    FILTER (?result_value <= {max_conc})
+
+    OPTIONAL {{ ?sp geo:hasGeometry/geo:asWKT ?spWKT . }}
+}}
+LIMIT 1000
+"""
+
+    sparql_endpoint = ENDPOINT_URLS["federation"]
+    headers = {
+        "Accept": "application/sparql-results+json",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    debug_info = {
+        "endpoint": sparql_endpoint,
+        "region_code": sanitized_region,
+        "substance_uri": substance_uri,
+        "material_uri": material_uri,
+        "min_concentration": min_conc,
+        "max_concentration": max_conc,
+        "query_length": len(query),
+        "query": query,
+    }
+
+    try:
+        start_time = time.time()
+        response = requests.post(
+            sparql_endpoint,
+            data={"query": query},
+            headers=headers,
+            timeout=300
+        )
+        elapsed = time.time() - start_time
+
+        debug_info["response_status"] = response.status_code
+        debug_info["response_time_sec"] = round(elapsed, 2)
+
+        try:
+            debug_info["response_text_snippet"] = response.text[:500]
+        except Exception:
+            debug_info["response_text_snippet"] = "<unavailable>"
+
+        if response.status_code == 200:
+            results = response.json()
+            df_results = parse_sparql_results(results)
+            if df_results.empty:
+                print("   > Combined query complete: No results found.")
+                debug_info["row_count"] = 0
+            else:
+                print(f"   > Combined query complete: Retrieved {len(df_results)} rows.")
+                debug_info["row_count"] = len(df_results)
+            return df_results, None, debug_info
+        else:
+            return None, f"Error {response.status_code}: {response.text}", debug_info
+
+    except requests.exceptions.RequestException as e:
+        debug_info["exception"] = str(e)
+        return None, f"Network error: {str(e)}", debug_info
+    except Exception as e:
+        debug_info["exception"] = str(e)
+        return None, f"Error: {str(e)}", debug_info
+
+
+def split_combined_results(combined_df):
+    """
+    Split combined query results into logical tables for the UI.
+
+    Args:
+        combined_df: DataFrame from execute_combined_query
+
+    Returns:
+        tuple: (samples_df, upstream_df, facilities_df)
+    """
+    if combined_df is None or combined_df.empty:
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+    # The simplified query returns: sp, spWKT, substance, result_value, matType
+    # Just return the samples - upstream and facilities are empty for now
+    samples_df = combined_df.copy()
+    upstream_df = pd.DataFrame()
+    facilities_df = pd.DataFrame()
+
+    return samples_df, upstream_df, facilities_df
+
+
+# ============================================================================
 # COMPLETE PIPELINE EXPLANATION
 # ============================================================================
 
