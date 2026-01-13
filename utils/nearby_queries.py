@@ -271,7 +271,7 @@ def execute_sparql_query(endpoint: str, query: str, method: str = 'POST', timeou
 
 def execute_nearby_analysis(
     naics_code: str | list[str],
-    region_code: str,
+    region_code: Optional[str],
     min_concentration: float = 0.0,
     max_concentration: float = 500.0,
     include_nondetects: bool = False
@@ -299,20 +299,25 @@ def execute_nearby_analysis(
         Tuple of (facilities_df, samples_df) - S2 cells are internal only
     """
     naics_codes = _normalize_naics_codes(naics_code)
-    if not naics_codes:
-        print("NEARBY ANALYSIS: No NAICS codes selected.")
-        return pd.DataFrame(), pd.DataFrame()
+    industry_label = ", ".join(naics_codes) if naics_codes else "ALL industries"
+    region_label = str(region_code).strip() if region_code else "ALL regions"
 
     print(f"\n{'='*60}")
-    print(f"NEARBY ANALYSIS: NAICS {', '.join(naics_codes)} in region {region_code}")
+    print(f"NEARBY ANALYSIS: {industry_label} in region {region_label}")
     print(f"Concentration range: {min_concentration}-{max_concentration} ng/L")
     print(f"Include nondetects: {include_nondetects}")
     print(f"{'='*60}\n")
     
     industry_filter = _build_industry_filter(naics_codes)
     
-    # Sanitize region code for URI
-    sanitized_region = str(region_code).strip()
+    region_filter = ""
+    if region_code:
+        sanitized_region = str(region_code).strip()
+        if sanitized_region:
+            region_filter = (
+                f"?s2cellFacility spatial:connectedTo "
+                f"kwgr:administrativeRegion.USA.{sanitized_region} ."
+            )
     
     # =========================================================================
     # CONSOLIDATED QUERY: Facilities + Neighboring S2 Cells + Samples
@@ -359,8 +364,8 @@ WHERE {{
     ?s2cellFacility rdf:type kwg-ont:S2Cell_Level13;
                     kwg-ont:sfContains ?facility.
     
-    # Step 3: Filter S2 cells to the specified region AND get neighboring cells
-    ?s2cellFacility spatial:connectedTo kwgr:administrativeRegion.USA.{sanitized_region}.
+    # Step 3: Optionally filter S2 cells to the specified region AND get neighboring cells
+    {region_filter}
     ?s2cellFacility kwg-ont:sfTouches|owl:sameAs ?s2cellNeighbor.
     
     # Step 4: Find contaminated samples in those S2 cells (facility cell + neighbors)
@@ -456,7 +461,7 @@ GROUP BY ?facility ?facWKT ?facilityName ?industryCode ?industryName ?industryGr
 
 def _execute_fallback_analysis(
     naics_code: str | list[str],
-    region_code: str,
+    region_code: Optional[str],
     min_concentration: float,
     max_concentration: float,
     include_nondetects: bool = False
@@ -495,14 +500,19 @@ def _execute_fallback_analysis(
     return facilities_df, samples_df
 
 
-def _get_facilities_in_region(naics_code: str | list[str], region_code: str) -> pd.DataFrame:
+def _get_facilities_in_region(naics_code: str | list[str], region_code: Optional[str]) -> pd.DataFrame:
     """Get facilities of specified industry type within a region"""
     naics_codes = _normalize_naics_codes(naics_code)
-    if not naics_codes:
-        return pd.DataFrame()
     industry_filter = _build_industry_filter(naics_codes)
     
-    sanitized_region = str(region_code).strip()
+    region_filter = ""
+    if region_code:
+        sanitized_region = str(region_code).strip()
+        if sanitized_region:
+            region_filter = (
+                f"?s2cell spatial:connectedTo "
+                f"kwgr:administrativeRegion.USA.{sanitized_region} ."
+            )
     
     query = f"""
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
@@ -516,8 +526,8 @@ PREFIX fio: <http://w3id.org/fio/v1/fio#>
 
 SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHERE {{
     ?s2cell rdf:type kwg-ont:S2Cell_Level13;
-            kwg-ont:sfContains ?facility;
-            spatial:connectedTo kwgr:administrativeRegion.USA.{sanitized_region}.
+            kwg-ont:sfContains ?facility.
+    {region_filter}
     
     ?facility fio:ofIndustry ?industryGroup;
               fio:ofIndustry ?industryCode;
@@ -530,7 +540,9 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
 }}
 """
     
-    print(f"   > Finding facilities for NAICS {', '.join(naics_codes)} in region {region_code}...")
+    industry_label = ", ".join(naics_codes) if naics_codes else "ALL industries"
+    region_label = str(region_code).strip() if region_code else "ALL regions"
+    print(f"   > Finding facilities for {industry_label} in region {region_label}...")
     results = execute_sparql_query(ENDPOINTS['fio'], query)
     df = parse_sparql_results(results)
     
@@ -540,14 +552,19 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     return df
 
 
-def _get_s2_cells_with_neighbors(naics_code: str | list[str], region_code: str) -> pd.DataFrame:
+def _get_s2_cells_with_neighbors(naics_code: str | list[str], region_code: Optional[str]) -> pd.DataFrame:
     """Get S2 cells containing facilities AND their neighboring cells in region"""
     naics_codes = _normalize_naics_codes(naics_code)
-    if not naics_codes:
-        return pd.DataFrame()
     industry_filter = _build_industry_filter(naics_codes)
     
-    sanitized_region = str(region_code).strip()
+    region_filter = ""
+    if region_code:
+        sanitized_region = str(region_code).strip()
+        if sanitized_region:
+            region_filter = (
+                f"?s2cellFacility spatial:connectedTo "
+                f"kwgr:administrativeRegion.USA.{sanitized_region} ."
+            )
     
     query = f"""
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
@@ -563,8 +580,8 @@ PREFIX owl: <http://www.w3.org/2002/07/owl#>
 SELECT DISTINCT ?s2cellNeighbor WHERE {{
     # Find S2 cells with facilities of this industry in the region
     ?s2cellFacility rdf:type kwg-ont:S2Cell_Level13;
-                    kwg-ont:sfContains ?facility;
-                    spatial:connectedTo kwgr:administrativeRegion.USA.{sanitized_region}.
+                    kwg-ont:sfContains ?facility.
+    {region_filter}
     
     ?facility fio:ofIndustry ?industryGroup;
               fio:ofIndustry ?industryCode.

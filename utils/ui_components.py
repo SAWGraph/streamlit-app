@@ -101,6 +101,7 @@ def render_hierarchical_naics_selector(
     default_value: Optional[str] = None,
     use_sidebar: bool = True,
     multi_select: bool = False,
+    allow_empty: bool = False,
 ) -> List[str] | str:
     """
     Render a hierarchical NAICS industry selector using st_ant_tree dropdown.
@@ -128,6 +129,8 @@ def render_hierarchical_naics_selector(
             return selected if multi_select else selected[0]
         elif default_value:
             return [default_value] if multi_select else default_value
+        elif allow_empty:
+            return [] if multi_select else ""
         else:
             fallback = list(naics_dict.keys())[default_index] if naics_dict else ""
             return [fallback] if multi_select and fallback else fallback
@@ -142,6 +145,7 @@ def render_hierarchical_naics_selector(
             default_index,
             container,
             multi_select=multi_select,
+            allow_empty=allow_empty,
         )
 
 
@@ -152,6 +156,7 @@ def _render_fallback_selector(
     default_index: int,
     container=None,
     multi_select: bool = False,
+    allow_empty: bool = False,
 ) -> List[str] | str:
     """Fallback selector using indented selectbox."""
     if container is None:
@@ -177,7 +182,7 @@ def _render_fallback_selector(
     option_to_code = {v: k for k, v in code_to_option.items()}
 
     if multi_select:
-        default_option = options[default_index] if options else None
+        default_option = options[default_index] if options and not allow_empty else None
         selected_options = container.multiselect(
             "Select Industry Type",
             options=options,
@@ -191,12 +196,17 @@ def _render_fallback_selector(
             if option in option_to_code
         ]
 
+    if allow_empty:
+        options = ["-- All Industries --"] + options
+
     selected_display = container.selectbox(
         "Select Industry Type",
         options=options,
-        index=default_index,
+        index=0 if allow_empty else default_index,
         key=key,
         help="Select NAICS industry code"
     )
 
+    if allow_empty and selected_display == "-- All Industries --":
+        return ""
     return option_to_code.get(selected_display, list(naics_dict.keys())[0] if naics_dict else "")

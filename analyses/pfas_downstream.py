@@ -176,7 +176,7 @@ def main(context: AnalysisContext) -> None:
         )
         st.session_state[include_nondetects_key] = include_nondetects
 
-        max_limit = 60000
+        max_limit = 500
 
         st.session_state[conc_min_key] = min(st.session_state[conc_min_key], max_limit)
         st.session_state[conc_max_key] = min(st.session_state[conc_max_key], max_limit)

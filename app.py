@@ -29,6 +29,11 @@ from utils.downstream_tracing_queries import (
     execute_downstream_samples_query,
     execute_downstream_step1_query,
 )
+from utils.upstream_tracing_queries import (
+    execute_sparql_query as execute_upstream_samples_query,
+    execute_hydrology_query as execute_upstream_hydrology_query,
+    execute_facility_query as execute_upstream_facility_query,
+)
 from utils.substance_filters import get_available_substances_with_labels
 from utils.material_filters import get_available_material_types_with_labels
 from utils.concentration_filters import get_max_concentration
@@ -784,7 +789,11 @@ try:
 
             # GEOGRAPHIC REGION SELECTION
             st.sidebar.markdown("### 📍 Geographic Region")
-            st.sidebar.markdown("🆃 **Required**: Select a state and county")
+            region_required = query_number in (1, 5)
+            if region_required:
+                st.sidebar.markdown("🆃 **Required**: Select a state and county")
+            else:
+                st.sidebar.markdown("Optional: select a state and county to limit results")
     
             # Get states with PFAS data available
             available_state_codes = get_available_state_codes()
@@ -881,8 +890,9 @@ try:
                         st.sidebar.error(st.session_state.county_rejected_msg)
                         del st.session_state.county_rejected_msg
     
+                    county_label = "2️⃣ Select County (Required)" if region_required else "2️⃣ Select County (Optional)"
                     selected_county_display = st.sidebar.selectbox(
-                        "2️⃣ Select County (Required)",
+                        county_label,
                         county_options,
                         key="county_selector",
                         on_change=on_county_change,
@@ -1127,7 +1137,7 @@ try:
                 st.session_state.conc_min_input = min_val
                 st.session_state.conc_max_input = max_val
 
-            max_limit = 60000
+            max_limit = 500
 
             st.session_state.conc_min_input = min(st.session_state.conc_min_input, max_limit)
             st.session_state.conc_max_input = min(st.session_state.conc_max_input, max_limit)
@@ -1146,7 +1156,6 @@ try:
                     "Min (ng/L)",
                     min_value=0,
                     max_value=max_limit,
-                    value=st.session_state.conc_min_input,
                     step=1,
                     key="conc_min_input",
                     help="Minimum concentration in nanograms per liter",
@@ -1159,7 +1168,6 @@ try:
                     "Max (ng/L)",
                     min_value=0,
                     max_value=max_limit,
-                    value=st.session_state.conc_max_input,
                     step=1,
                     key="conc_max_input",
                     help="Maximum concentration in nanograms per liter",
@@ -1259,40 +1267,56 @@ try:
                 # Initialize placeholders
                 samples_df = pd.DataFrame()
                 upstream_s2_df = pd.DataFrame()
+                upstream_flowlines_df = pd.DataFrame()
                 facilities_df = pd.DataFrame()
                 combined_df = None
                 combined_error = None
                 debug_info = None
                 
-                # Step 1: Run combined query
+                step1_error = None
+                step2_error = None
+                step3_error = None
+
+                # Step 1: Find contaminated samples
                 with prog_col1:
-                    with st.spinner("🔄 Step 1: Running upstream tracing query..."):
+                    with st.spinner("🔄 Step 1: Finding contaminated samples..."):
                         effective_min = 0 if include_nondetects else min_concentration
-                        combined_df, combined_error, debug_info = execute_combined_query(
-                            substance_uri=selected_substance_uri,
-                            material_uri=selected_material_uri,
-                            min_conc=effective_min,
-                            max_conc=max_concentration,
-                            region_code=query_region_code,
-                            include_nondetects=include_nondetects
+                        samples_df, step1_error = execute_upstream_samples_query(
+                            selected_substance_uri,
+                            selected_material_uri,
+                            effective_min,
+                            max_concentration,
+                            query_region_code,
                         )
-                    
-                    samples_df, upstream_s2_df, facilities_df = split_combined_results(combined_df)
-                    
+
+                    if samples_df is None:
+                        samples_df = pd.DataFrame()
+
                     # Also query the region boundary for mapping
                     region_boundary_df = get_region_boundary(query_region_code)
 
-                    if combined_error:
-                        st.error(f"❌ Step 1 failed: {combined_error}")
+                    if step1_error:
+                        st.error(f"❌ Step 1 failed: {step1_error}")
                     elif not samples_df.empty:
                         st.success(f"✅ Step 1: Found {len(samples_df)} contaminated samples")
                     else:
-                        st.warning(f"⚠️ Step 1: No contaminated samples found")
+                        st.warning("⚠️ Step 1: No contaminated samples found")
             
                 # Step 2: Trace upstream flow paths
                 with prog_col2:
-                    if not samples_df.empty:
-                        if not upstream_s2_df.empty:
+                    if step1_error:
+                        st.info("⏭️ Step 2: Skipped (step 1 error)")
+                    elif not samples_df.empty:
+                        with st.spinner("🔄 Step 2: Tracing upstream flow paths..."):
+                            upstream_s2_df, upstream_flowlines_df, step2_error = execute_upstream_hydrology_query(samples_df)
+                            if upstream_s2_df is None:
+                                upstream_s2_df = pd.DataFrame()
+                            if upstream_flowlines_df is None:
+                                upstream_flowlines_df = pd.DataFrame()
+
+                        if step2_error:
+                            st.error(f"❌ Step 2 failed: {step2_error}")
+                        elif not upstream_s2_df.empty:
                             st.success(f"✅ Step 2: Traced {len(upstream_s2_df)} upstream paths")
                         else:
                             st.info("ℹ️ Step 2: No upstream sources found")
@@ -1301,18 +1325,37 @@ try:
             
                 # Step 3: Find facilities
                 with prog_col3:
-                    if not upstream_s2_df.empty:
-                        if not facilities_df.empty:
+                    if step2_error:
+                        st.info("⏭️ Step 3: Skipped (step 2 error)")
+                    elif not upstream_s2_df.empty:
+                        with st.spinner("🔄 Step 3: Finding upstream facilities..."):
+                            facilities_df, step3_error = execute_upstream_facility_query(upstream_s2_df)
+                            if facilities_df is None:
+                                facilities_df = pd.DataFrame()
+
+                        if step3_error:
+                            st.error(f"❌ Step 3 failed: {step3_error}")
+                        elif not facilities_df.empty:
                             st.success(f"✅ Step 3: Found {len(facilities_df)} facilities")
                         else:
                             st.info("ℹ️ Step 3: No facilities found")
                     else:
                         st.info("⏭️ Step 3: Skipped (no upstream cells)")
 
+                combined_error = step1_error or step2_error or step3_error
+                debug_info = {
+                    "step1_error": step1_error,
+                    "step2_error": step2_error,
+                    "step3_error": step3_error,
+                }
+                if not combined_error:
+                    debug_info = None
+
                 # Store everything in session state
                 st.session_state.query_results = {
                     'samples_df': samples_df,
                     'upstream_s2_df': upstream_s2_df,
+                    'upstream_flowlines_df': upstream_flowlines_df,
                     'facilities_df': facilities_df,
                     'combined_error': combined_error,
                     'debug_info': debug_info,
@@ -1330,6 +1373,7 @@ try:
             # Retrieve data from session state
             samples_df = results.get('samples_df')
             upstream_s2_df = results.get('upstream_s2_df')
+            upstream_flowlines_df = results.get('upstream_flowlines_df')
             facilities_df = results.get('facilities_df')
             combined_error = results.get('combined_error')
             debug_info = results.get('debug_info')
@@ -1518,9 +1562,15 @@ try:
                             st.warning(f"Could not parse facility geometries: {e}")
             
                 # Process upstream flow lines
-                if upstream_s2_df is not None and not upstream_s2_df.empty and 'upstream_flowlineWKT' in upstream_s2_df.columns:
+                flowlines_source = None
+                if upstream_flowlines_df is not None and not upstream_flowlines_df.empty and 'upstream_flowlineWKT' in upstream_flowlines_df.columns:
+                    flowlines_source = upstream_flowlines_df
+                elif upstream_s2_df is not None and not upstream_s2_df.empty and 'upstream_flowlineWKT' in upstream_s2_df.columns:
+                    flowlines_source = upstream_s2_df
+
+                if flowlines_source is not None:
                     # Filter out empty WKT values
-                    flowlines_with_wkt = upstream_s2_df[upstream_s2_df['upstream_flowlineWKT'].notna()].copy()
+                    flowlines_with_wkt = flowlines_source[flowlines_source['upstream_flowlineWKT'].notna()].copy()
                     if not flowlines_with_wkt.empty:
                         try:
                             flowlines_with_wkt['geometry'] = flowlines_with_wkt['upstream_flowlineWKT'].apply(wkt.loads)
@@ -1667,11 +1717,12 @@ try:
                             )
                 
                     # Add layer control
-                    folium.LayerControl(collapsed=False).add_to(map_obj)
+                    folium.LayerControl(collapsed=True).add_to(map_obj)
                     
                 
                     # Display map
-                    st_folium(map_obj, width=None, height=600, returned_objects=[])
+                    with st.spinner("Loading map..."):
+                        st_folium(map_obj, width=None, height=600, returned_objects=[])
                 
                     # Map legend
                     st.info("""
@@ -1819,7 +1870,7 @@ try:
                 st.session_state.q5_conc_min_input = min_val
                 st.session_state.q5_conc_max_input = max_val
 
-            max_limit = 60000
+            max_limit = 500
 
             st.session_state.q5_conc_min_input = min(st.session_state.q5_conc_min_input, max_limit)
             st.session_state.q5_conc_max_input = min(st.session_state.q5_conc_max_input, max_limit)
@@ -1837,7 +1888,6 @@ try:
                     "Min (ng/L)",
                     min_value=0,
                     max_value=max_limit,
-                    value=st.session_state.q5_conc_min_input,
                     step=1,
                     key="q5_conc_min_input",
                     help="Minimum concentration in nanograms per liter",
@@ -1850,7 +1900,6 @@ try:
                     "Max (ng/L)",
                     min_value=0,
                     max_value=max_limit,
-                    value=st.session_state.q5_conc_max_input,
                     step=1,
                     key="q5_conc_max_input",
                     help="Maximum concentration in nanograms per liter",
@@ -2321,12 +2370,13 @@ try:
             st.sidebar.info("Using default NAICS list (PFAS industries query returned no results).")
             pfas_industries = NAICS_INDUSTRIES
 
-        default_naics = "221320" if "221320" in pfas_industries else next(iter(pfas_industries), "")
+        default_naics = ""
         selected_naics_codes = render_hierarchical_naics_selector(
             naics_dict=pfas_industries,
             key="q2_industry_selector",
             default_value=default_naics,
             multi_select=True,
+            allow_empty=True,
         )
 
         if isinstance(selected_naics_codes, str):
@@ -2354,7 +2404,7 @@ try:
             selected_labels.append(f"{code} - {label}" if label else code)
 
         if not selected_labels:
-            selected_industry_display = "No selection"
+            selected_industry_display = "All industries"
         elif len(selected_labels) <= 3:
             selected_industry_display = ", ".join(selected_labels)
         else:
@@ -2381,21 +2431,28 @@ try:
             elif selected_county_code:
                 region_code = str(selected_county_code).zfill(5)
 
-            q2_max_limit = 60000
+            q2_max_limit = 500
+            q2_slider_max = 500
 
-            if "q2_conc_range" not in st.session_state:
-                st.session_state.q2_conc_range = (st.session_state.q2_conc_min, st.session_state.q2_conc_max)
             if "q2_conc_min_input" not in st.session_state:
                 st.session_state.q2_conc_min_input = st.session_state.q2_conc_min
             if "q2_conc_max_input" not in st.session_state:
                 st.session_state.q2_conc_max_input = st.session_state.q2_conc_max
+            if "q2_conc_range" not in st.session_state:
+                st.session_state.q2_conc_range = (
+                    min(st.session_state.q2_conc_min, q2_slider_max),
+                    min(st.session_state.q2_conc_max, q2_slider_max),
+                )
 
             def sync_q2_from_inputs():
                 min_val = st.session_state.q2_conc_min_input
                 max_val = st.session_state.q2_conc_max_input
                 st.session_state.q2_conc_min = min_val
                 st.session_state.q2_conc_max = max_val
-                st.session_state.q2_conc_range = (min_val, max_val)
+                st.session_state.q2_conc_range = (
+                    min(min_val, q2_slider_max),
+                    min(max_val, q2_slider_max),
+                )
 
             def sync_q2_from_slider():
                 min_val, max_val = st.session_state.q2_conc_range
@@ -2406,9 +2463,13 @@ try:
 
             st.session_state.q2_conc_min_input = min(st.session_state.q2_conc_min_input, q2_max_limit)
             st.session_state.q2_conc_max_input = min(st.session_state.q2_conc_max_input, q2_max_limit)
+            if st.session_state.q2_conc_min_input > st.session_state.q2_conc_max_input:
+                st.session_state.q2_conc_max_input = st.session_state.q2_conc_min_input
+            st.session_state.q2_conc_min = st.session_state.q2_conc_min_input
+            st.session_state.q2_conc_max = st.session_state.q2_conc_max_input
             range_min, range_max = st.session_state.q2_conc_range
-            range_min = min(range_min, q2_max_limit)
-            range_max = min(range_max, q2_max_limit)
+            range_min = min(range_min, q2_slider_max)
+            range_max = min(range_max, q2_slider_max)
             if range_min > range_max:
                 range_max = range_min
             st.session_state.q2_conc_range = (range_min, range_max)
@@ -2440,17 +2501,18 @@ try:
             
             # Slider for visual adjustment
             st.slider(
-                "Drag to adjust range",
+                "Drag to adjust range (0–500)",
                 min_value=0,
-                max_value=q2_max_limit,
+                max_value=q2_slider_max,
                 value=st.session_state.q2_conc_range,
                 step=1,
                 key="q2_conc_range",
-                help="Drag the slider or use the number inputs above",
+                help="Drag to adjust the concentration range",
                 on_change=sync_q2_from_slider
             )
 
-            q2_min_concentration, q2_max_concentration = st.session_state.q2_conc_range
+            q2_min_concentration = st.session_state.q2_conc_min
+            q2_max_concentration = st.session_state.q2_conc_max
             
             # Validate range
             if q2_min_concentration > q2_max_concentration:
@@ -2467,16 +2529,14 @@ try:
             st.markdown("---")
             
             # Execute button (same style as Query 1)
-            county_selected = bool(st.session_state.get("selected_county_code"))
-            industry_selected = bool(selected_naics_codes)
-            can_execute = county_selected and state_has_data and industry_selected
+            can_execute = True
             execute_q2 = st.button(
                 "🔍 Execute Query",
                 type="primary",
                 use_container_width=True,
                 disabled=not can_execute,
                 help=(
-                    "Select a state with data, a county, and at least one industry first"
+                    "Run the nearby facilities analysis"
                     if not can_execute
                     else "Execute the nearby facilities analysis"
                 ),
@@ -2495,34 +2555,31 @@ try:
         
         # Execute the query when form is submitted
         if execute_q2:
-            if not selected_state_code:
-                st.error("❌ Please select a state in the sidebar first!")
-            else:
-                region_boundary_df = None
-                with st.spinner(f"Searching for samples near {selected_industry_display}..."):
-                    # Execute the consolidated analysis (single query)
-                    facilities_df, samples_df = execute_nearby_analysis(
-                        naics_code=selected_naics_codes,
-                        region_code=region_code_q2,
-                        min_concentration=q2_min_concentration,
-                        max_concentration=q2_max_concentration,
-                        include_nondetects=include_nondetects
-                    )
-                    if region_code_q2:
-                        region_boundary_df = get_region_boundary(region_code_q2)
-                    
-                    # Store results in session state
-                    st.session_state['q2_facilities'] = facilities_df
-                    st.session_state['q2_samples'] = samples_df
-                    st.session_state['q2_industry'] = selected_industry_display
-                    st.session_state['q2_industry_codes'] = selected_naics_codes
-                    st.session_state['q2_industry_labels'] = {
-                        code: pfas_industries.get(code, code) for code in selected_naics_codes
-                    }
-                    st.session_state['q2_region_code'] = region_code_q2
-                    st.session_state['q2_region_boundary_df'] = region_boundary_df
-                    st.session_state['q2_range_used'] = (q2_min_concentration, q2_max_concentration)
-                    st.session_state['q2_executed'] = True
+            region_boundary_df = None
+            with st.spinner(f"Searching for samples near {selected_industry_display}..."):
+                # Execute the consolidated analysis (single query)
+                facilities_df, samples_df = execute_nearby_analysis(
+                    naics_code=selected_naics_codes,
+                    region_code=region_code_q2,
+                    min_concentration=q2_min_concentration,
+                    max_concentration=q2_max_concentration,
+                    include_nondetects=include_nondetects
+                )
+                if region_code_q2:
+                    region_boundary_df = get_region_boundary(region_code_q2)
+                
+                # Store results in session state
+                st.session_state['q2_facilities'] = facilities_df
+                st.session_state['q2_samples'] = samples_df
+                st.session_state['q2_industry'] = selected_industry_display
+                st.session_state['q2_industry_codes'] = selected_naics_codes
+                st.session_state['q2_industry_labels'] = {
+                    code: pfas_industries.get(code, code) for code in selected_naics_codes
+                }
+                st.session_state['q2_region_code'] = region_code_q2
+                st.session_state['q2_region_boundary_df'] = region_boundary_df
+                st.session_state['q2_range_used'] = (q2_min_concentration, q2_max_concentration)
+                st.session_state['q2_executed'] = True
         
         # Display Results
         if st.session_state.get('q2_executed', False):
@@ -2691,13 +2748,13 @@ try:
                                 samples_gdf['geometry'] = samples_gdf['spWKT'].apply(wkt.loads)
                                 samples_gdf = gpd.GeoDataFrame(samples_gdf, geometry='geometry', crs='EPSG:4326')
                                 
-                                sample_popup_cols = [
-                                    c for c in ["spName", "max", "results", "Materials"] if c in samples_gdf.columns
-                                ]
-                                samples_gdf.explore(
-                                    m=map_obj,
-                                    name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_gdf)})</span>',
-                                    color='DarkOrange',
+                            sample_popup_cols = [
+                                c for c in ["spName", "max", "datedresults", "Materials"] if c in samples_gdf.columns
+                            ]
+                            samples_gdf.explore(
+                                m=map_obj,
+                                name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_gdf)})</span>',
+                                color='DarkOrange',
                                     marker_kwds=dict(radius=6),
                                     popup=sample_popup_cols if sample_popup_cols else True,
                                     show=True
@@ -2707,7 +2764,7 @@ try:
                             folium.LayerControl(collapsed=True).add_to(map_obj)
                             
                             # Display map
-                            st_folium(map_obj, width=None, height=600, returned_objects=[])
+                            st_folium(map_obj, width=None, height=800, returned_objects=[])
                             
                             st.caption(f"Selected industries: {industry_display}")
 
@@ -2746,9 +2803,7 @@ try:
                                 'spName',
                                 'max',
                                 'resultCount',
-                                'results',
                                 'datedresults',
-                                'dates',
                                 'Type',
                                 'Materials',
                                 'sp'

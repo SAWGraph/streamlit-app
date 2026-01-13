@@ -12,7 +12,10 @@ FEDERATION_ENDPOINT = "https://frink.apps.renci.org/federation/sparql"
 COMPTox_DSS_TOX_ENDPOINT = (
     "https://comptox.epa.gov/dashboard-api/ccdapp2/chemical-detail/search/by-dsstoxsid"
 )
+WQP_CHARACTERISTIC_ENDPOINT = "https://www.waterqualitydata.us/Codes/characteristicname"
 DSSTOX_URI_PREFIX = "http://w3id.org/DSSTox/v1/DTXSID"
+WQP_URI_FRAGMENT = "#characteristic."
+WQP_LABEL_LOOKUP_ENABLED = True
 
 
 def parse_sparql_results(results: dict) -> pd.DataFrame:
@@ -58,12 +61,21 @@ def execute_sparql_query(query: str, timeout: int = 60) -> Optional[dict]:
 
 
 def _fallback_substance_name(substance_uri: str) -> str:
-    return substance_uri.rstrip("/").rsplit("/", 1)[-1]
+    cleaned = substance_uri.rstrip("/")
+    if "#" in cleaned:
+        return cleaned.rsplit("#", 1)[-1]
+    return cleaned.rsplit("/", 1)[-1]
 
 
 def _extract_dsstox_id(substance_uri: str) -> Optional[str]:
     if substance_uri.startswith(DSSTOX_URI_PREFIX):
         return _fallback_substance_name(substance_uri)
+    return None
+
+
+def _extract_wqp_id(substance_uri: str) -> Optional[str]:
+    if WQP_URI_FRAGMENT in substance_uri:
+        return substance_uri.split(WQP_URI_FRAGMENT, 1)[-1]
     return None
 
 
@@ -85,6 +97,49 @@ def _fetch_comptox_label(dsstox_id: str) -> Optional[str]:
     if not isinstance(label, str) or not label.strip():
         return None
     return label.strip()
+
+
+@lru_cache(maxsize=2048)
+def _fetch_wqp_label(characteristic_id: str) -> Optional[str]:
+    global WQP_LABEL_LOOKUP_ENABLED
+    if not WQP_LABEL_LOOKUP_ENABLED:
+        return None
+    try:
+        response = requests.get(
+            WQP_CHARACTERISTIC_ENDPOINT,
+            params={"characteristicID": characteristic_id},
+            headers={"Accept": "application/json"},
+            timeout=10
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+    except Exception:
+        return None
+
+    codes = data.get("codes")
+    if not isinstance(codes, list) or not codes:
+        return None
+
+    id_keys = ("characteristicID", "characteristicId", "id", "code")
+    has_id_field = any(
+        isinstance(item, dict) and any(k in item for k in id_keys)
+        for item in codes[:50]
+    )
+    if not has_id_field:
+        # Endpoint returns name-only codes; avoid repeated full downloads.
+        WQP_LABEL_LOOKUP_ENABLED = False
+        return None
+
+    for item in codes:
+        if not isinstance(item, dict):
+            continue
+        for key in id_keys:
+            if str(item.get(key)) == characteristic_id:
+                value = item.get("value") or item.get("name")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
 
 
 def get_available_substances_with_labels(
@@ -156,6 +211,7 @@ SELECT DISTINCT ?substance ?label WHERE {{
     df = df.drop_duplicates(subset=["substance"], keep="first")
     df["display_name"] = df["label"]
     df["dsstox_id"] = df["substance"].apply(_extract_dsstox_id)
+    df["wqp_id"] = df["substance"].apply(_extract_wqp_id)
 
     def _resolve_display_name(row: pd.Series) -> str:
         if pd.notna(row["display_name"]):
@@ -165,6 +221,11 @@ SELECT DISTINCT ?substance ?label WHERE {{
             comptox_label = _fetch_comptox_label(dsstox_id)
             if comptox_label:
                 return comptox_label
+        wqp_id = row.get("wqp_id")
+        if isinstance(wqp_id, str) and wqp_id:
+            wqp_label = _fetch_wqp_label(wqp_id)
+            if wqp_label:
+                return wqp_label
         return _fallback_substance_name(row["substance"])
 
     df["display_name"] = df.apply(_resolve_display_name, axis=1)

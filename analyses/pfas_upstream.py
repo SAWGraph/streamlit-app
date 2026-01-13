@@ -12,8 +12,9 @@ from shapely import wkt
 
 from analysis_registry import AnalysisContext
 from utils.upstream_tracing_queries import (
-    execute_combined_query,
-    split_combined_results,
+    execute_sparql_query,
+    execute_hydrology_query,
+    execute_facility_query,
 )
 from utils.substance_filters import get_available_substances_with_labels
 from utils.material_filters import get_available_material_types_with_labels
@@ -54,7 +55,7 @@ def main(context: AnalysisContext) -> None:
     if conc_min_key not in st.session_state:
         st.session_state[conc_min_key] = 0
     if conc_max_key not in st.session_state:
-        st.session_state[conc_max_key] = 60000
+        st.session_state[conc_max_key] = 500
     
     # Query parameters in sidebar form
     st.sidebar.markdown("### 🧪 Query Parameters")
@@ -178,7 +179,7 @@ def main(context: AnalysisContext) -> None:
         )
         st.session_state[include_nondetects_key] = include_nondetects
 
-        max_limit = 60000
+        max_limit = 500
 
         st.session_state[conc_min_key] = min(st.session_state[conc_min_key], max_limit)
         st.session_state[conc_max_key] = min(st.session_state[conc_max_key], max_limit)
@@ -208,13 +209,13 @@ def main(context: AnalysisContext) -> None:
 
         # Range slider for concentration selection
         # Using slider as primary control to avoid sync issues with form
-        # Max set to 60000 to cover highest observed concentrations (SUM_OF_5_PFAS can reach 53000+)
+        # Max set to 500 for a consistent slider range across analyses
         slider_value = st.slider(
             "Select concentration range (ng/L)",
             min_value=0,
             max_value=max_limit,
             value=(st.session_state[conc_min_key], st.session_state[conc_max_key]),
-            step=10,
+            step=1,
             key=f"{analysis_key}_concentration_slider",
             help="Drag to select min and max concentration in nanograms per liter"
         )
@@ -287,39 +288,55 @@ def main(context: AnalysisContext) -> None:
             # Initialize placeholders
             samples_df = pd.DataFrame()
             upstream_s2_df = pd.DataFrame()
+            upstream_flowlines_df = pd.DataFrame()
             facilities_df = pd.DataFrame()
-            combined_df = None
             combined_error = None
             debug_info = None
-            
-            # Step 1: Run combined query
+
+            step1_error = None
+            step2_error = None
+            step3_error = None
+
+            # Step 1: Find contaminated samples
             with prog_col1:
-                with st.spinner("🔄 Step 1: Running upstream tracing query..."):
-                    combined_df, combined_error, debug_info = execute_combined_query(
-                        substance_uri=selected_substance_uri,
-                        material_uri=selected_material_uri,
-                        min_conc=min_concentration,
-                        max_conc=max_concentration,
-                        region_code=context.region_code,
-                        include_nondetects=include_nondetects
+                with st.spinner("🔄 Step 1: Finding contaminated samples..."):
+                    effective_min = 0 if include_nondetects else min_concentration
+                    samples_df, step1_error = execute_sparql_query(
+                        selected_substance_uri,
+                        selected_material_uri,
+                        effective_min,
+                        max_concentration,
+                        context.region_code,
                     )
-                
-                samples_df, upstream_s2_df, facilities_df = split_combined_results(combined_df)
-                
+
+                if samples_df is None:
+                    samples_df = pd.DataFrame()
+
                 # Also query the region boundary for mapping
                 region_boundary_df = get_region_boundary(context.region_code)
 
-                if combined_error:
-                    st.error(f"❌ Step 1 failed: {combined_error}")
+                if step1_error:
+                    st.error(f"❌ Step 1 failed: {step1_error}")
                 elif not samples_df.empty:
                     st.success(f"✅ Step 1: Found {len(samples_df)} contaminated samples")
                 else:
-                    st.warning(f"⚠️ Step 1: No contaminated samples found")
+                    st.warning("⚠️ Step 1: No contaminated samples found")
         
             # Step 2: Trace upstream flow paths
             with prog_col2:
-                if not samples_df.empty:
-                    if not upstream_s2_df.empty:
+                if step1_error:
+                    st.info("⏭️ Step 2: Skipped (step 1 error)")
+                elif not samples_df.empty:
+                    with st.spinner("🔄 Step 2: Tracing upstream flow paths..."):
+                        upstream_s2_df, upstream_flowlines_df, step2_error = execute_hydrology_query(samples_df)
+                        if upstream_s2_df is None:
+                            upstream_s2_df = pd.DataFrame()
+                        if upstream_flowlines_df is None:
+                            upstream_flowlines_df = pd.DataFrame()
+
+                    if step2_error:
+                        st.error(f"❌ Step 2 failed: {step2_error}")
+                    elif not upstream_s2_df.empty:
                         st.success(f"✅ Step 2: Traced {len(upstream_s2_df)} upstream paths")
                     else:
                         st.info("ℹ️ Step 2: No upstream sources found")
@@ -328,18 +345,37 @@ def main(context: AnalysisContext) -> None:
         
             # Step 3: Find facilities
             with prog_col3:
-                if not upstream_s2_df.empty:
-                    if not facilities_df.empty:
+                if step2_error:
+                    st.info("⏭️ Step 3: Skipped (step 2 error)")
+                elif not upstream_s2_df.empty:
+                    with st.spinner("🔄 Step 3: Finding upstream facilities..."):
+                        facilities_df, step3_error = execute_facility_query(upstream_s2_df)
+                        if facilities_df is None:
+                            facilities_df = pd.DataFrame()
+
+                    if step3_error:
+                        st.error(f"❌ Step 3 failed: {step3_error}")
+                    elif not facilities_df.empty:
                         st.success(f"✅ Step 3: Found {len(facilities_df)} facilities")
                     else:
                         st.info("ℹ️ Step 3: No facilities found")
                 else:
                     st.info("⏭️ Step 3: Skipped (no upstream cells)")
 
+            combined_error = step1_error or step2_error or step3_error
+            debug_info = {
+                "step1_error": step1_error,
+                "step2_error": step2_error,
+                "step3_error": step3_error,
+            }
+            if not combined_error:
+                debug_info = None
+
             # Store everything in session state
             st.session_state[results_key] = {
                 'samples_df': samples_df,
                 'upstream_s2_df': upstream_s2_df,
+                'upstream_flowlines_df': upstream_flowlines_df,
                 'facilities_df': facilities_df,
                 'combined_error': combined_error,
                 'debug_info': debug_info,
@@ -357,6 +393,7 @@ def main(context: AnalysisContext) -> None:
         # Retrieve data from session state
         samples_df = results.get('samples_df')
         upstream_s2_df = results.get('upstream_s2_df')
+        upstream_flowlines_df = results.get('upstream_flowlines_df')
         facilities_df = results.get('facilities_df')
         combined_error = results.get('combined_error')
         debug_info = results.get('debug_info')
@@ -548,9 +585,15 @@ def main(context: AnalysisContext) -> None:
                         st.warning(f"Could not parse facility geometries: {e}")
         
             # Process upstream flow lines
-            if upstream_s2_df is not None and not upstream_s2_df.empty and 'upstream_flowlineWKT' in upstream_s2_df.columns:
+            flowlines_source = None
+            if upstream_flowlines_df is not None and not upstream_flowlines_df.empty and 'upstream_flowlineWKT' in upstream_flowlines_df.columns:
+                flowlines_source = upstream_flowlines_df
+            elif upstream_s2_df is not None and not upstream_s2_df.empty and 'upstream_flowlineWKT' in upstream_s2_df.columns:
+                flowlines_source = upstream_s2_df
+
+            if flowlines_source is not None:
                 # Filter out empty WKT values
-                flowlines_with_wkt = upstream_s2_df[upstream_s2_df['upstream_flowlineWKT'].notna()].copy()
+                flowlines_with_wkt = flowlines_source[flowlines_source['upstream_flowlineWKT'].notna()].copy()
                 if not flowlines_with_wkt.empty:
                     try:
                         flowlines_with_wkt['geometry'] = flowlines_with_wkt['upstream_flowlineWKT'].apply(wkt.loads)
@@ -695,11 +738,12 @@ def main(context: AnalysisContext) -> None:
                         )
             
                 # Add layer control
-                folium.LayerControl(collapsed=False).add_to(map_obj)
+                folium.LayerControl(collapsed=True).add_to(map_obj)
                 
             
                 # Display map
-                st_folium(map_obj, width=None, height=600, returned_objects=[])
+                with st.spinner("Loading map..."):
+                    st_folium(map_obj, width=None, height=600, returned_objects=[])
             
                 # Map legend
                 st.info("""

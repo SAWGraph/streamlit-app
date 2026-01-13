@@ -304,7 +304,7 @@ WHERE {{
 # STEP 2: TRACE UPSTREAM THROUGH HYDROLOGICAL NETWORKS
 # ============================================================================
 
-def execute_hydrology_query(contaminated_samples_df):
+def execute_hydrology_query(contaminated_samples_df, max_start_s2_cells: int = 100, max_flowlines: int = 1000):
     """
     STEP 2: Trace upstream to find all S2 cells that flow toward contaminated areas
     
@@ -364,9 +364,10 @@ def execute_hydrology_query(contaminated_samples_df):
         
     RETURNS:
     --------
-    tuple: (df_results, error)
-        df_results (pd.DataFrame): Upstream S2 cells with columns:
+    tuple: (upstream_s2_df, flowlines_df, error)
+        upstream_s2_df (pd.DataFrame): Upstream S2 cells with column:
             - s2cell: S2 grid cell URI (USED IN STEP 3)
+        flowlines_df (pd.DataFrame): Flowline WKTs for mapping (limited)
         error (str or None): Error message if query failed
     
     TECHNICAL NOTES:
@@ -383,19 +384,19 @@ def execute_hydrology_query(contaminated_samples_df):
     
     if not s2_list:
         print("   > No S2 cells to trace upstream.")
-        return pd.DataFrame(), None  # Empty result, not an error
+        return pd.DataFrame(), pd.DataFrame(), None  # Empty result, not an error
     
     # Debug output
     print(f"   > First few S2 cells from Step 1: {s2_list[:3] if len(s2_list) >= 3 else s2_list}")
     
-    # Optimization: Limit to top 100 most contaminated S2 cells to prevent timeout
-    if len(s2_list) > 100:
-        print(f"   > Too many S2 cells ({len(s2_list)}), limiting to top 100")
+    # Optimization: Limit to top N most contaminated S2 cells to prevent timeout
+    if len(s2_list) > max_start_s2_cells:
+        print(f"   > Too many S2 cells ({len(s2_list)}), limiting to top {max_start_s2_cells}")
         
         # Count samples per S2 cell and take top 100
         # This prioritizes contamination hotspots over isolated detections
         s2_counts = contaminated_samples_df['s2cell'].value_counts()
-        s2_list = s2_counts.head(100).index.tolist()
+        s2_list = s2_counts.head(max_start_s2_cells).index.tolist()
         
         print(f"   > Top S2 cell has {s2_counts.iloc[0]} contaminated samples")
     
@@ -409,14 +410,14 @@ def execute_hydrology_query(contaminated_samples_df):
     else:
         print(f"   > VALUES string: {s2_values_string}")
     
-    # Build the upstream tracing SPARQL query
-    query = f"""PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+    # Build the upstream tracing SPARQL query (S2 cells only)
+    cells_query = f"""PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
 PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
 PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
 PREFIX hyf: <https://www.opengis.net/def/schema/hy_features/hyf/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-SELECT DISTINCT ?s2cell 
+SELECT DISTINCT ?s2cell
 WHERE {{
     # Find flowlines (rivers/streams) connected to contaminated S2 cells
     # These are the "downstream" flowlines (where contamination is)
@@ -439,6 +440,27 @@ WHERE {{
             rdf:type kwg-ont:S2Cell_Level13 .
 }}"""
 
+    # Flowlines query with a cap for mapping
+    flowlines_query = f"""PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX hyf: <https://www.opengis.net/def/schema/hy_features/hyf/>
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+SELECT DISTINCT ?upstream_flowlineWKT
+WHERE {{
+    ?downstream_flowline rdf:type hyf:HY_FlowPath ;
+                        spatial:connectedTo ?s2cellds .
+
+    ?upstream_flowline hyf:downstreamFlowPathTC ?downstream_flowline ;
+                       geo:hasGeometry/geo:asWKT ?upstream_flowlineWKT .
+
+    VALUES ?s2cellds {{ {s2_values_string} }}
+}}
+LIMIT {int(max_flowlines)}
+"""
+
     sparql_endpoint = ENDPOINT_URLS["hydrology"]
     headers = {
         "Accept": "application/sparql-results+json",
@@ -449,7 +471,7 @@ WHERE {{
         # Use POST request (query in request body, not URL)
         # This prevents "414 Request-URI Too Large" errors when querying many S2 cells
         print(f"   > Sending query to hydrology endpoint (timeout: 120s)...")
-        response = requests.post(sparql_endpoint, data={"query": query}, headers=headers, timeout=120)
+        response = requests.post(sparql_endpoint, data={"query": cells_query}, headers=headers, timeout=120)
         
         if response.status_code == 200:
             results = response.json()
@@ -459,15 +481,35 @@ WHERE {{
                 print("   > Step 2 complete: No upstream hydrological sources found.")
             else:
                 print(f"   > Step 2 complete: Found {len(df_results)} upstream S2 cells.")
-            
-            return df_results, None
+            df_results = df_results.drop_duplicates().reset_index(drop=True)
+
+            # Fetch a limited set of flowline geometries for mapping
+            flowlines_df = pd.DataFrame()
+            try:
+                flowlines_response = requests.post(
+                    sparql_endpoint,
+                    data={"query": flowlines_query},
+                    headers=headers,
+                    timeout=120
+                )
+                if flowlines_response.status_code == 200:
+                    flowlines_results = flowlines_response.json()
+                    flowlines_df = parse_sparql_results(flowlines_results)
+                    if not flowlines_df.empty:
+                        flowlines_df = flowlines_df.drop_duplicates().reset_index(drop=True)
+                else:
+                    print(f"   > Flowlines query failed with status {flowlines_response.status_code}")
+            except requests.exceptions.RequestException as e:
+                print(f"   > Flowlines query error: {str(e)}")
+
+            return df_results, flowlines_df, None
         else:
-            return None, f"Error {response.status_code}: {response.text}"
+            return None, pd.DataFrame(), f"Error {response.status_code}: {response.text}"
             
     except requests.exceptions.RequestException as e:
-        return None, f"Network error: {str(e)}"
+        return None, pd.DataFrame(), f"Network error: {str(e)}"
     except Exception as e:
-        return None, f"Error: {str(e)}"
+        return None, pd.DataFrame(), f"Error: {str(e)}"
 
 
 # ============================================================================
@@ -959,4 +1001,3 @@ Potential Research Directions:
 4. Extend to other contaminants beyond PFAS
 5. Incorporate temporal analysis (when was contamination released vs. detected)
 """
-
