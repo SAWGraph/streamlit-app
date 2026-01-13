@@ -17,6 +17,7 @@ import os
 import folium
 import time
 import math
+import inspect
 from streamlit_folium import st_folium
 import geopandas as gpd
 from shapely import wkt
@@ -2371,13 +2372,20 @@ try:
             pfas_industries = NAICS_INDUSTRIES
 
         default_naics = ""
-        selected_naics_codes = render_hierarchical_naics_selector(
-            naics_dict=pfas_industries,
-            key="q2_industry_selector",
-            default_value=default_naics,
-            multi_select=True,
-            allow_empty=True,
-        )
+        selector_kwargs = {
+            "naics_dict": pfas_industries,
+            "key": "q2_industry_selector",
+            "default_value": default_naics,
+            "multi_select": True,
+        }
+        if "allow_empty" in inspect.signature(render_hierarchical_naics_selector).parameters:
+            selector_kwargs["allow_empty"] = True
+        selected_naics_codes = render_hierarchical_naics_selector(**selector_kwargs)
+        if "allow_empty" not in selector_kwargs:
+            if not st.session_state.get("q2_industry_selector") and pfas_industries:
+                fallback_code = next(iter(pfas_industries.keys()))
+                if selected_naics_codes == fallback_code:
+                    selected_naics_codes = []
 
         if isinstance(selected_naics_codes, str):
             selected_naics_codes = [selected_naics_codes] if selected_naics_codes else []
