@@ -132,15 +132,38 @@ def main(context: AnalysisContext) -> None:
         if sites_gdf is not None and not sites_gdf.empty:
             sites_points = sites_gdf.copy()
             sites_points["geometry"] = sites_points.geometry.centroid
+            site_fields = [c for c in ["locationId", "locationDescription", "location"] if c in sites_points.columns]
             sites_points.explore(
                 m=map_obj,
                 name='<span style="color:Red;">📍 SOCKG Locations</span>',
                 color="Red",
                 marker_kwds=dict(radius=6),
                 marker_type="circle_marker",
-                popup=["locationId", "locationDescription"]
-                if all(c in sites_points.columns for c in ["locationId", "locationDescription"])
-                else True,
+                tooltip=site_fields if site_fields else True,
+                tooltip_kwds=dict(
+                    aliases=site_fields if site_fields else None,
+                    localize=True,
+                    labels=True,
+                    sticky=False,
+                    style=(
+                        "background-color: white; border-radius: 3px; "
+                        "box-shadow: 3px 3px 5px grey; padding: 10px; "
+                        "font-family: sans-serif; font-size: 14px; max-width: 450px; "
+                        "overflow-wrap: break-word;"
+                    ),
+                ),
+                popup=site_fields if site_fields else True,
+                popup_kwds=dict(
+                    aliases=site_fields if site_fields else None,
+                    localize=True,
+                    labels=True,
+                    style=(
+                        "background-color: white; border-radius: 3px; "
+                        "box-shadow: 3px 3px 5px grey; padding: 10px; "
+                        "font-family: sans-serif; font-size: 14px; max-width: 450px; "
+                        "overflow-wrap: break-word;"
+                    ),
+                ),
                 show=True,
             )
 
@@ -151,28 +174,82 @@ def main(context: AnalysisContext) -> None:
             other_facilities = facilities_points[~facilities_points["PFASusing"]]
 
             if not other_facilities.empty:
+                other_fields = [
+                    c
+                    for c in ["facilityName", "industrySector", "industrySubsector", "industries", "locations"]
+                    if c in other_facilities.columns
+                ]
                 other_facilities.explore(
                     m=map_obj,
                     name='<span style="color:MidnightBlue;">🏭 Other Facilities</span>',
                     color="MidnightBlue",
                     marker_kwds=dict(radius=4),
                     marker_type="circle_marker",
-                    popup=["facilityName", "industrySector"]
-                    if all(c in other_facilities.columns for c in ["facilityName", "industrySector"])
-                    else True,
+                    tooltip=other_fields if other_fields else True,
+                    tooltip_kwds=dict(
+                        aliases=other_fields if other_fields else None,
+                        localize=True,
+                        labels=True,
+                        sticky=False,
+                        style=(
+                            "background-color: white; border-radius: 3px; "
+                            "box-shadow: 3px 3px 5px grey; padding: 10px; "
+                            "font-family: sans-serif; font-size: 14px; max-width: 650px; "
+                            "overflow-wrap: break-word;"
+                        ),
+                    ),
+                    popup=other_fields if other_fields else True,
+                    popup_kwds=dict(
+                        aliases=other_fields if other_fields else None,
+                        localize=True,
+                        labels=True,
+                        style=(
+                            "background-color: white; border-radius: 3px; "
+                            "box-shadow: 3px 3px 5px grey; padding: 10px; "
+                            "font-family: sans-serif; font-size: 14px; max-width: 650px; "
+                            "overflow-wrap: break-word;"
+                        ),
+                    ),
                     show=True,
                 )
 
             if not pfas_facilities.empty:
+                pfas_fields = [
+                    c
+                    for c in ["facilityName", "industrySector", "industrySubsector", "PFASusing", "industries", "locations"]
+                    if c in pfas_facilities.columns
+                ]
                 pfas_facilities.explore(
                     m=map_obj,
                     name='<span style="color:DarkRed;">⚠️ PFAS-Related Facilities</span>',
                     color="DarkRed",
                     marker_kwds=dict(radius=5),
                     marker_type="circle_marker",
-                    popup=["facilityName", "industries"]
-                    if all(c in pfas_facilities.columns for c in ["facilityName", "industries"])
-                    else True,
+                    tooltip=pfas_fields if pfas_fields else True,
+                    tooltip_kwds=dict(
+                        aliases=pfas_fields if pfas_fields else None,
+                        localize=True,
+                        labels=True,
+                        sticky=False,
+                        style=(
+                            "background-color: white; border-radius: 3px; "
+                            "box-shadow: 3px 3px 5px grey; padding: 10px; "
+                            "font-family: sans-serif; font-size: 14px; max-width: 650px; "
+                            "overflow-wrap: break-word;"
+                        ),
+                    ),
+                    popup=pfas_fields if pfas_fields else True,
+                    popup_kwds=dict(
+                        aliases=pfas_fields if pfas_fields else None,
+                        localize=True,
+                        labels=True,
+                        style=(
+                            "background-color: white; border-radius: 3px; "
+                            "box-shadow: 3px 3px 5px grey; padding: 10px; "
+                            "font-family: sans-serif; font-size: 14px; max-width: 650px; "
+                            "overflow-wrap: break-word;"
+                        ),
+                    ),
                     show=True,
                 )
 

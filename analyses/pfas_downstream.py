@@ -74,100 +74,136 @@ def main(context: AnalysisContext) -> None:
     # NOTE: Downstream tracing runs from ALL facilities that match the selected industry
     # in the selected region (matches the notebook's "industry-driven" flow).
 
-    # Other parameters in a form
-    with st.sidebar.form(key=f"{analysis_key}_params_form"):
-        # DETECTED CONCENTRATION
-        st.markdown("### 📊 Detected Concentration")
+    # Other parameters (outside a form so concentration inputs can sync with slider)
+    st.sidebar.markdown("### 📊 Detected Concentration")
 
-        # Include nondetects option (matches upstream/nearby behavior)
-        include_nondetects_key = f"{analysis_key}_include_nondetects"
-        include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
-        if include_nondetects_key not in st.session_state:
-            st.session_state[include_nondetects_key] = False
-        if include_nondetects_pending_key not in st.session_state:
-            st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
-        include_nondetects = st.checkbox(
-            "Include nondetects",
-            value=st.session_state[include_nondetects_pending_key],
-            key=f"{analysis_key}_nondetects_checkbox_pending",
-            help="Include observations flagged as non-detect (included alongside detected results in range)",
+    # Include nondetects option (matches upstream/nearby behavior)
+    include_nondetects_key = f"{analysis_key}_include_nondetects"
+    include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
+    if include_nondetects_key not in st.session_state:
+        st.session_state[include_nondetects_key] = False
+    if include_nondetects_pending_key not in st.session_state:
+        st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
+    include_nondetects = st.sidebar.checkbox(
+        "Include nondetects",
+        value=st.session_state[include_nondetects_pending_key],
+        key=f"{analysis_key}_nondetects_checkbox_pending",
+        help="Include observations flagged as non-detect (included alongside detected results in range)",
+    )
+    st.session_state[include_nondetects_pending_key] = include_nondetects
+
+    # Live sync behavior:
+    # - If BOTH inputs are <=500, keep inputs <-> slider in sync
+    # - If user types >500, stop syncing and use typed values
+    base_max_limit = 500
+
+    applied_min = max(0, int(st.session_state[conc_min_key]))
+    applied_max = max(0, int(st.session_state[conc_max_key]))
+    if applied_min > applied_max:
+        applied_max = applied_min
+    st.session_state[conc_min_key] = applied_min
+    st.session_state[conc_max_key] = applied_max
+
+    min_pending_key = f"{analysis_key}_conc_min_pending"
+    max_pending_key = f"{analysis_key}_conc_max_pending"
+    slider_key = f"{analysis_key}_concentration_slider"
+    if min_pending_key not in st.session_state:
+        st.session_state[min_pending_key] = applied_min
+    if max_pending_key not in st.session_state:
+        st.session_state[max_pending_key] = applied_max
+    if slider_key not in st.session_state:
+        st.session_state[slider_key] = (
+            min(st.session_state[min_pending_key], base_max_limit),
+            min(st.session_state[max_pending_key], base_max_limit),
         )
-        st.session_state[include_nondetects_pending_key] = include_nondetects
 
-        max_limit = 500
+    # Capture prior values BEFORE widgets update session_state (for reliable change detection)
+    prior_min = int(st.session_state.get(min_pending_key, applied_min))
+    prior_max = int(st.session_state.get(max_pending_key, applied_max))
+    prior_slider = tuple(
+        st.session_state.get(
+            slider_key,
+            (int(min(prior_min, base_max_limit)), int(min(prior_max, base_max_limit))),
+        )
+    )
 
-        st.session_state[conc_min_key] = min(st.session_state[conc_min_key], max_limit)
-        st.session_state[conc_max_key] = min(st.session_state[conc_max_key], max_limit)
-        if st.session_state[conc_min_key] > st.session_state[conc_max_key]:
-            st.session_state[conc_max_key] = st.session_state[conc_min_key]
+    st.session_state[min_pending_key] = max(0, int(st.session_state[min_pending_key]))
+    st.session_state[max_pending_key] = max(0, int(st.session_state[max_pending_key]))
+    if st.session_state[min_pending_key] > st.session_state[max_pending_key]:
+        st.session_state[max_pending_key] = st.session_state[min_pending_key]
 
-        # Show current min/max boxes above the slider
-        min_col, max_col = st.columns(2)
-        min_col.number_input(
+    min_col, max_col = st.sidebar.columns(2)
+    min_input = min_col.number_input(
             "Min (ng/L)",
-            value=st.session_state[conc_min_key],
             min_value=0,
+        step=1,
             format="%d",
-            disabled=True,
-            key=f"{analysis_key}_concentration_min_display",
-            help="Minimum value reflected from the slider"
+        key=min_pending_key,
         )
-        max_col.number_input(
+    max_input = max_col.number_input(
             "Max (ng/L)",
-            value=st.session_state[conc_max_key],
             min_value=0,
+        step=1,
             format="%d",
-            disabled=True,
-            key=f"{analysis_key}_concentration_max_display",
-            help="Maximum value reflected from the slider"
+        key=max_pending_key,
         )
 
-        # Range slider for concentration selection
-        slider_value = st.slider(
+    slider_value = st.sidebar.slider(
             "Select concentration range (ng/L)",
             min_value=0,
-            max_value=max_limit,
-            value=(st.session_state[conc_min_key], st.session_state[conc_max_key]),
+        max_value=base_max_limit,
+        value=(
+            int(min(st.session_state[min_pending_key], base_max_limit)),
+            int(min(st.session_state[max_pending_key], base_max_limit)),
+        ),
             step=1,
-            key=f"{analysis_key}_concentration_slider",
-            help="Drag to select min and max concentration in nanograms per liter"
-        )
+        key=slider_key,
+        help="Drag to select min and max concentration in nanograms per liter",
+    )
 
-        # Extract slider values
-        min_concentration, max_concentration = slider_value
+    min_input_i = int(min_input)
+    max_input_i = int(max_input)
+    slider_min_i, slider_max_i = map(int, slider_value)
 
-        # Update session state
-        st.session_state[conc_min_key] = min_concentration
-        st.session_state[conc_max_key] = max_concentration
+    if min_input_i <= base_max_limit and max_input_i <= base_max_limit:
+        if (slider_min_i, slider_max_i) != tuple(prior_slider) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
+            st.session_state[min_pending_key] = slider_min_i
+            st.session_state[max_pending_key] = slider_max_i
+            st.rerun()
+        if (min_input_i, max_input_i) != (prior_min, prior_max) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
+            st.session_state[slider_key] = (min_input_i, max_input_i)
+            st.rerun()
 
-        # Display selected range clearly
-        st.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
-        
-        st.markdown("---")
-        
-        # Execute button - state, county, and industry are all required
-        has_state = bool(context.selected_state_code)
-        has_county = bool(context.selected_county_code)
-        has_industry = bool(selected_naics_code)
-        can_execute = has_state and has_county and has_industry
-        
-        # Build help message for missing selections
-        missing = []
-        if not has_state:
-            missing.append("state")
-        if not has_county:
-            missing.append("county")
-        if not has_industry:
-            missing.append("industry")
-        
-        help_text = f"Select {', '.join(missing)} first" if missing else "Execute the downstream tracing analysis"
-        
-        execute_button = st.form_submit_button(
+    min_concentration = max(0, int(st.session_state[min_pending_key]))
+    max_concentration = max(0, int(st.session_state[max_pending_key]))
+    if min_concentration > max_concentration:
+        max_concentration = min_concentration
+
+    st.sidebar.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
+    st.sidebar.markdown("---")
+
+    # Execute button - state, county, and industry are all required
+    has_state = bool(context.selected_state_code)
+    has_county = bool(context.selected_county_code)
+    has_industry = bool(selected_naics_code)
+    can_execute = has_state and has_county and has_industry
+
+    missing = []
+    if not has_state:
+        missing.append("state")
+    if not has_county:
+        missing.append("county")
+    if not has_industry:
+        missing.append("industry")
+
+    help_text = f"Select {', '.join(missing)} first" if missing else "Execute the downstream tracing analysis"
+
+    execute_button = st.sidebar.button(
             "🔍 Execute Query",
             type="primary",
             use_container_width=True,
-            disabled=not can_execute,
-            help=help_text
+        disabled=not can_execute,
+        help=help_text,
         )
     
     # Execute the query when form is submitted
@@ -175,6 +211,8 @@ def main(context: AnalysisContext) -> None:
         # Apply pending nondetect selection only on submit
         st.session_state[include_nondetects_key] = st.session_state.get(include_nondetects_pending_key, False)
         include_nondetects = st.session_state[include_nondetects_key]
+        st.session_state[conc_min_key] = min_concentration
+        st.session_state[conc_max_key] = max_concentration
         # Validate all required fields
         missing_fields = []
         if not context.selected_state_code:
@@ -246,10 +284,9 @@ def main(context: AnalysisContext) -> None:
                         naics_code=selected_naics_code,
                         region_code=context.region_code,
                     )
-
-                debug_info["step2"] = step2_debug
-                if step2_error:
-                    step_errors["step2"] = step2_error
+                    debug_info["step2"] = step2_debug
+                    if step2_error:
+                        step_errors["step2"] = step2_error
 
                 if step2_error:
                     st.error(f"❌ Step 2 failed: {step2_error}")
@@ -272,17 +309,16 @@ def main(context: AnalysisContext) -> None:
                         max_conc=max_concentration,
                         include_nondetects=include_nondetects,
                     )
-
-                debug_info["step3"] = step3_debug
-                if step3_error:
-                    step_errors["step3"] = step3_error
-                    
+                    debug_info["step3"] = step3_debug
                     if step3_error:
-                        st.error(f"❌ Step 3 failed: {step3_error}")
-                    elif not samples_df.empty:
-                        st.success(f"✅ Step 3: Found {len(samples_df)} downstream samples")
-                    else:
-                        st.info("ℹ️ Step 3: No downstream samples found")
+                        step_errors["step3"] = step3_error
+
+                if step3_error:
+                    st.error(f"❌ Step 3 failed: {step3_error}")
+                elif not samples_df.empty:
+                    st.success(f"✅ Step 3: Found {len(samples_df)} downstream samples")
+                else:
+                    st.info("ℹ️ Step 3: No downstream samples found")
             
             st.session_state[results_key] = {
                 "facilities_df": facilities_df,
@@ -432,7 +468,7 @@ def main(context: AnalysisContext) -> None:
                 map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
             else:
                 map_obj = folium.Map(location=[39.8, -98.5], zoom_start=4)
-
+            
             # Ensure popups wrap long content instead of overflowing outside the card.
             try:
                 popup_css = """

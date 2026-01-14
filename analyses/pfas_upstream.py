@@ -77,175 +77,210 @@ def main(context: AnalysisContext) -> None:
         else pd.DataFrame()
     )
     
-    # Wrap parameters in a form to prevent immediate reruns
-    with st.sidebar.form(key=f"{analysis_key}_params_form"):
-        st.markdown("### 🧪 PFAS Substance")
+    # Sidebar parameters (outside a form so concentration inputs can sync with slider)
+    st.sidebar.markdown("### 🧪 PFAS Substance")
 
-        substance_map = {}
-        if not substances_view.empty:
-            for _, row in substances_view.iterrows():
-                name = row["display_name"]
-                uri = row["substance"]
-                if name not in substance_map or uri.endswith("_A"):
-                    substance_map[name] = uri
+    substance_map = {}
+    if not substances_view.empty:
+        for _, row in substances_view.iterrows():
+            name = row["display_name"]
+            uri = row["substance"]
+            if name not in substance_map or uri.endswith("_A"):
+                substance_map[name] = uri
 
-        substance_options = ["-- All Substances --"] + sorted(substance_map.keys())
+    substance_options = ["-- All Substances --"] + sorted(substance_map.keys())
 
-        selected_substance_display = st.selectbox(
-            "Select PFAS Substance (Optional)",
-            substance_options,
-            help="Select a specific PFAS compound to analyze, or leave as 'All Substances'"
-        )
+    selected_substance_display = st.sidebar.selectbox(
+        "Select PFAS Substance (Optional)",
+        substance_options,
+        help="Select a specific PFAS compound to analyze, or leave as 'All Substances'",
+    )
 
-        # Get the selected substance's full URI
-        selected_substance_uri = None
-        selected_substance_name = None
-        if selected_substance_display != "-- All Substances --":
-            selected_substance_name = selected_substance_display
-            selected_substance_uri = substance_map.get(selected_substance_display)
-            if selected_substance_uri:
-                st.session_state[selected_substance_key] = {
-                    'name': selected_substance_name,
-                    'uri': selected_substance_uri
-                }
-        else:
-            st.session_state[selected_substance_key] = None
-    
-        st.markdown("---")
-    
-        # MATERIAL TYPE SELECTION (Optional)
-        st.markdown("### 🧫 Sample Material Type")
-        
-        # Get available material types for the selected region (cached)
-        @st.cache_data(ttl=3600)
-        def get_available_material_types_view(region_code: str, is_subdivision: bool, _version: int = 4):
-            """Get material types available in the selected region with display names."""
-            return get_available_material_types_with_labels(region_code, is_subdivision)
-
-        material_types_view = (
-            get_available_material_types_view(context.region_code, is_subdivision, _version=4)
-            if context.region_code
-            else pd.DataFrame()
-        )
-    
-        material_type_options = ["-- All Material Types --"]
-        material_type_display = {}
-
-        if not material_types_view.empty:
-            for _, row in material_types_view.iterrows():
-                display_name = row["display_name"]
-                material_type_options.append(display_name)
-                material_type_display[display_name] = row["matType"]
-    
-        selected_material_display = st.selectbox(
-            "Select Material Type (Optional)",
-            material_type_options,
-            help="Select the type of sample material analyzed (e.g., Drinking Water, Groundwater, Soil)"
-        )
-    
-        # Get the selected material type's details
-        selected_material_uri = None
-        selected_material_short = None
-        selected_material_label = None
-        selected_material_name = None
-    
-        if selected_material_display != "-- All Material Types --":
-            selected_material_name = selected_material_display
-            selected_material_uri = material_type_display.get(selected_material_display)
-            selected_material_short = selected_material_display
-            selected_material_label = selected_material_display
-            st.session_state[selected_material_type_key] = {
-                'short': selected_material_short,
-                'label': selected_material_label,
-                'uri': selected_material_uri,
-                'name': selected_material_name
+    # Get the selected substance's full URI
+    selected_substance_uri = None
+    selected_substance_name = None
+    if selected_substance_display != "-- All Substances --":
+        selected_substance_name = selected_substance_display
+        selected_substance_uri = substance_map.get(selected_substance_display)
+        if selected_substance_uri:
+            st.session_state[selected_substance_key] = {
+                "name": selected_substance_name,
+                "uri": selected_substance_uri,
             }
-        else:
-            st.session_state[selected_material_type_key] = None
-    
-        st.markdown("---")
-    
-        # DETECTED CONCENTRATION SELECTION
-        st.markdown("### 📊 Detected Concentration")
+    else:
+        st.session_state[selected_substance_key] = None
 
-        # Include nondetects option
-        # Use a "pending" key so toggling doesn't affect the applied value until Execute is clicked.
-        include_nondetects_key = f"{analysis_key}_include_nondetects"
-        include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
-        if include_nondetects_key not in st.session_state:
-            st.session_state[include_nondetects_key] = False
-        if include_nondetects_pending_key not in st.session_state:
-            st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
+    st.sidebar.markdown("---")
 
-        include_nondetects = st.checkbox(
-            "Include nondetects",
-            value=st.session_state[include_nondetects_pending_key],
-            key=f"{analysis_key}_nondetects_checkbox_pending",
-            help="Include observations with zero concentration or nondetect flags"
+    # MATERIAL TYPE SELECTION (Optional)
+    st.sidebar.markdown("### 🧫 Sample Material Type")
+
+    # Get available material types for the selected region (cached)
+    @st.cache_data(ttl=3600)
+    def get_available_material_types_view(region_code: str, is_subdivision: bool, _version: int = 4):
+        """Get material types available in the selected region with display names."""
+        return get_available_material_types_with_labels(region_code, is_subdivision)
+
+    material_types_view = (
+        get_available_material_types_view(context.region_code, is_subdivision, _version=4)
+        if context.region_code
+        else pd.DataFrame()
+    )
+
+    material_type_options = ["-- All Material Types --"]
+    material_type_display = {}
+
+    if not material_types_view.empty:
+        for _, row in material_types_view.iterrows():
+            display_name = row["display_name"]
+            material_type_options.append(display_name)
+            material_type_display[display_name] = row["matType"]
+
+    selected_material_display = st.sidebar.selectbox(
+        "Select Material Type (Optional)",
+        material_type_options,
+        help="Select the type of sample material analyzed (e.g., Drinking Water, Groundwater, Soil)",
+    )
+
+    # Get the selected material type's details
+    selected_material_uri = None
+    selected_material_short = None
+    selected_material_label = None
+    selected_material_name = None
+
+    if selected_material_display != "-- All Material Types --":
+        selected_material_name = selected_material_display
+        selected_material_uri = material_type_display.get(selected_material_display)
+        selected_material_short = selected_material_display
+        selected_material_label = selected_material_display
+        st.session_state[selected_material_type_key] = {
+            "short": selected_material_short,
+            "label": selected_material_label,
+            "uri": selected_material_uri,
+            "name": selected_material_name,
+        }
+    else:
+        st.session_state[selected_material_type_key] = None
+
+    st.sidebar.markdown("---")
+
+    # DETECTED CONCENTRATION SELECTION
+    st.sidebar.markdown("### 📊 Detected Concentration")
+
+    # Include nondetects option
+    include_nondetects_key = f"{analysis_key}_include_nondetects"
+    include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
+    if include_nondetects_key not in st.session_state:
+        st.session_state[include_nondetects_key] = False
+    if include_nondetects_pending_key not in st.session_state:
+        st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
+
+    include_nondetects = st.sidebar.checkbox(
+        "Include nondetects",
+        value=st.session_state[include_nondetects_pending_key],
+        key=f"{analysis_key}_nondetects_checkbox_pending",
+        help="Include observations with zero concentration or nondetect flags",
+    )
+    st.session_state[include_nondetects_pending_key] = include_nondetects
+
+    # Live sync behavior:
+    # - If BOTH inputs are <=500, keep inputs <-> slider in sync
+    # - If user types >500, stop syncing and use typed values
+    base_max_limit = 500
+
+    applied_min = max(0, int(st.session_state[conc_min_key]))
+    applied_max = max(0, int(st.session_state[conc_max_key]))
+    if applied_min > applied_max:
+        applied_max = applied_min
+    st.session_state[conc_min_key] = applied_min
+    st.session_state[conc_max_key] = applied_max
+
+    min_pending_key = f"{analysis_key}_conc_min_pending"
+    max_pending_key = f"{analysis_key}_conc_max_pending"
+    slider_key = f"{analysis_key}_concentration_slider"
+    if min_pending_key not in st.session_state:
+        st.session_state[min_pending_key] = applied_min
+    if max_pending_key not in st.session_state:
+        st.session_state[max_pending_key] = applied_max
+    if slider_key not in st.session_state:
+        st.session_state[slider_key] = (
+            min(st.session_state[min_pending_key], base_max_limit),
+            min(st.session_state[max_pending_key], base_max_limit),
         )
-        st.session_state[include_nondetects_pending_key] = include_nondetects
 
-        max_limit = 500
-
-        st.session_state[conc_min_key] = min(st.session_state[conc_min_key], max_limit)
-        st.session_state[conc_max_key] = min(st.session_state[conc_max_key], max_limit)
-        if st.session_state[conc_min_key] > st.session_state[conc_max_key]:
-            st.session_state[conc_max_key] = st.session_state[conc_min_key]
-
-        # Display current min/max values above the slider
-        min_col, max_col = st.columns(2)
-        min_col.number_input(
-            "Min (ng/L)",
-            value=st.session_state[conc_min_key],
-            min_value=0,
-            format="%d",
-            disabled=True,
-            key=f"{analysis_key}_concentration_min_display",
-            help="Minimum value reflected from the slider"
+    # Capture prior values BEFORE widgets update session_state (for reliable change detection)
+    prior_min = int(st.session_state.get(min_pending_key, applied_min))
+    prior_max = int(st.session_state.get(max_pending_key, applied_max))
+    prior_slider = tuple(
+        st.session_state.get(
+            slider_key,
+            (int(min(prior_min, base_max_limit)), int(min(prior_max, base_max_limit))),
         )
-        max_col.number_input(
-            "Max (ng/L)",
-            value=st.session_state[conc_max_key],
-            min_value=0,
-            format="%d",
-            disabled=True,
-            key=f"{analysis_key}_concentration_max_display",
-            help="Maximum value reflected from the slider"
-        )
+    )
 
-        # Range slider for concentration selection
-        # Using slider as primary control to avoid sync issues with form
-        # Max set to 500 for a consistent slider range across analyses
-        slider_value = st.slider(
-            "Select concentration range (ng/L)",
-            min_value=0,
-            max_value=max_limit,
-            value=(st.session_state[conc_min_key], st.session_state[conc_max_key]),
-            step=1,
-            key=f"{analysis_key}_concentration_slider",
-            help="Drag to select min and max concentration in nanograms per liter"
-        )
+    st.session_state[min_pending_key] = max(0, int(st.session_state[min_pending_key]))
+    st.session_state[max_pending_key] = max(0, int(st.session_state[max_pending_key]))
+    if st.session_state[min_pending_key] > st.session_state[max_pending_key]:
+        st.session_state[max_pending_key] = st.session_state[min_pending_key]
 
-        # Extract slider values
-        min_concentration, max_concentration = slider_value
+    min_col, max_col = st.sidebar.columns(2)
+    min_input = min_col.number_input(
+        "Min (ng/L)",
+        min_value=0,
+        step=1,
+        format="%d",
+        key=min_pending_key,
+    )
+    max_input = max_col.number_input(
+        "Max (ng/L)",
+        min_value=0,
+        step=1,
+        format="%d",
+        key=max_pending_key,
+    )
 
-        # Update session state
-        st.session_state[conc_min_key] = min_concentration
-        st.session_state[conc_max_key] = max_concentration
+    slider_value = st.sidebar.slider(
+        "Select concentration range (ng/L)",
+        min_value=0,
+        max_value=base_max_limit,
+        value=(
+            int(min(st.session_state[min_pending_key], base_max_limit)),
+            int(min(st.session_state[max_pending_key], base_max_limit)),
+        ),
+        step=1,
+        key=slider_key,
+        help="Drag to select min and max concentration in nanograms per liter",
+    )
 
-        # Display selected range clearly
-        st.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
+    min_input_i = int(min_input)
+    max_input_i = int(max_input)
+    slider_min_i, slider_max_i = map(int, slider_value)
 
-        # Execute Query Button
-        st.markdown("---")
-        county_selected = context.selected_county_code is not None
-        execute_button = st.form_submit_button(
-            "🔍 Execute Query",
-            type="primary",
-            use_container_width=True,
-            disabled=not county_selected,
-            help="Select a county first" if not county_selected else "Execute the upstream tracing analysis"
-        )
+    if min_input_i <= base_max_limit and max_input_i <= base_max_limit:
+        if (slider_min_i, slider_max_i) != tuple(prior_slider) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
+            st.session_state[min_pending_key] = slider_min_i
+            st.session_state[max_pending_key] = slider_max_i
+            st.rerun()
+        if (min_input_i, max_input_i) != (prior_min, prior_max) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
+            st.session_state[slider_key] = (min_input_i, max_input_i)
+            st.rerun()
+
+    min_concentration = max(0, int(st.session_state[min_pending_key]))
+    max_concentration = max(0, int(st.session_state[max_pending_key]))
+    if min_concentration > max_concentration:
+        max_concentration = min_concentration
+
+    st.sidebar.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
+
+    st.sidebar.markdown("---")
+    county_selected = context.selected_county_code is not None
+    execute_button = st.sidebar.button(
+        "🔍 Execute Query",
+        type="primary",
+        use_container_width=True,
+        disabled=not county_selected,
+        help="Select a county first" if not county_selected else "Execute the upstream tracing analysis",
+    )
 
     # Display query parameters when Execute button is clicked
     # Logic to handle query execution and result persistence
@@ -253,6 +288,8 @@ def main(context: AnalysisContext) -> None:
         # Apply pending nondetect selection only on submit
         st.session_state[include_nondetects_key] = st.session_state.get(include_nondetects_pending_key, False)
         include_nondetects = st.session_state[include_nondetects_key]
+        st.session_state[conc_min_key] = min_concentration
+        st.session_state[conc_max_key] = max_concentration
         # Validate required parameters
         if not context.selected_state_code:
             st.error("❌ **State selection is required!** Please select a state before executing the query.")

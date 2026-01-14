@@ -94,7 +94,7 @@ def _build_industry_filter(naics_code: Optional[str]) -> str:
         return f"VALUES ?industryGroup {{naics:NAICS-{code}}}."
 
 
-def _build_region_filter(region_code: Optional[str]) -> str:
+def _build_region_filter(region_code: Optional[str], county_var: str = "?county") -> str:
     """
     Build SPARQL region filter for county/state.
     """
@@ -104,16 +104,58 @@ def _build_region_filter(region_code: Optional[str]) -> str:
     code = str(region_code).strip()
     if len(code) <= 2:
         # State code (e.g., "18" for Indiana)
-        return f"""?county rdf:type kwg-ont:AdministrativeRegion_2 ;
+        return f"""{county_var} rdf:type kwg-ont:AdministrativeRegion_2 ;
                    kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."""
     elif len(code) == 5:
-        # County FIPS code (e.g., "23019")
-        state_code = code[:2]
-        return f"""?county rdf:type kwg-ont:AdministrativeRegion_2 ;
-                   kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{state_code} ."""
+        # County FIPS code (e.g., "23019") - restrict to the selected county
+        return "\n".join(
+            [
+                f"VALUES {county_var} {{ kwgr:administrativeRegion.USA.{code} }} .",
+                f"{county_var} rdf:type kwg-ont:AdministrativeRegion_2 .",
+            ]
+        )
     else:
         # More specific region - not supported in this query style
         return ""
+
+
+def _state_code_from_region(region_code: Optional[str]) -> Optional[str]:
+    if not region_code:
+        return None
+    code = str(region_code).strip()
+    if not code:
+        return None
+    if len(code) == 5:
+        return code[:2]
+    if len(code) <= 2:
+        return code
+    return None
+
+
+def _build_ar3_region_filter(region_code: Optional[str], ar3_var: str = "?ar3") -> str:
+    """
+    Build a region restriction pattern for SamplePoints via AdministrativeRegion_3 (subdivision).
+
+    This mirrors the legacy/step1 approach used elsewhere:
+    - For state (2-digit) or county (5-digit) codes: constrain ?ar3 to be within that region
+      using administrativePartOf+.
+    - For subdivision geoIds (>5 digits): use datacommons geoId IRI directly.
+    """
+    if not region_code:
+        return ""
+    code = str(region_code).strip()
+    if not code:
+        return ""
+
+    if len(code) > 5:
+        # subdivision geoId
+        return f"VALUES {ar3_var} {{ <https://datacommons.org/browser/geoId/{code}> }} ."
+
+    # state or county
+    return (
+        f"{ar3_var} rdf:type kwg-ont:AdministrativeRegion_3 ; "
+        f"kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
+    )
 
 
 def _build_facility_values(facility_uris: Optional[List[str]]) -> str:
@@ -161,7 +203,11 @@ def execute_downstream_facilities_query(
         DataFrame with columns: facility, facWKT, facilityName, industryCode, industryName
     """
     industry_filter = _build_industry_filter(naics_code)
-    region_filter = _build_region_filter(region_code)
+    # NOTE: Downstream region restriction should NOT narrow facilities to a county.
+    # We still constrain facilities to the selected state (when a county is chosen)
+    # to avoid an unbounded nationwide scan.
+    facilities_region_code = _state_code_from_region(region_code)
+    region_filter = _build_region_filter(facilities_region_code, county_var="?facCounty")
     
     if not industry_filter:
         return pd.DataFrame(), "Industry type is required for downstream tracing", {"error": "No industry selected"}
@@ -180,7 +226,7 @@ PREFIX fio: <http://w3id.org/fio/v1/fio#>
 SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHERE {{
     ?facility fio:ofIndustry ?industryGroup;
         fio:ofIndustry ?industryCode ;
-        spatial:connectedTo ?county ;
+        spatial:connectedTo ?facCounty ;
         geo:hasGeometry/geo:asWKT ?facWKT;
         rdfs:label ?facilityName.
     {region_filter}
@@ -220,7 +266,10 @@ def execute_downstream_streams_query(
 
     facility_values = _build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
-    region_filter = _build_region_filter(region_code)
+    # NOTE: Do not narrow facilities/streams to a county, but keep a state constraint
+    # when the user selected a county to avoid a nationwide scan.
+    facilities_region_code = _state_code_from_region(region_code)
+    region_filter = _build_region_filter(facilities_region_code, county_var="?facCounty")
 
     # If a facility is provided, we trace from that facility directly (not from the whole industry set).
     if facility_values:
@@ -253,7 +302,7 @@ WHERE {{
         {facility_values}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
-            spatial:connectedTo ?county.
+            spatial:connectedTo ?facCounty.
         {region_filter}
         ?industryCode a naics:NAICS-IndustryCode;
             fio:subcodeOf ?industryGroup ;
@@ -313,7 +362,10 @@ def execute_downstream_samples_query(
 
     facility_values = _build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
-    region_filter = _build_region_filter(region_code)
+    # Region restriction should apply to sample points (not facilities) via AR3.
+    sample_region_filter = _build_ar3_region_filter(region_code, ar3_var="?ar3")
+    facilities_region_code = _state_code_from_region(region_code)
+    facility_region_filter = _build_region_filter(facilities_region_code, county_var="?facCounty")
 
     # If a facility is provided, we trace from that facility directly (not from the whole industry set).
     if facility_values:
@@ -369,8 +421,8 @@ WHERE {{
         {facility_values}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
-            spatial:connectedTo ?county.
-        {region_filter}
+            spatial:connectedTo ?facCounty.
+        {facility_region_filter}
         ?industryCode a naics:NAICS-IndustryCode;
             fio:subcodeOf ?industryGroup ;
             rdfs:label ?industryName.
@@ -388,7 +440,9 @@ WHERE {{
 
     ?samplePoint kwg-ont:sfWithin ?s2cell;
         rdf:type coso:SamplePoint;
-        geo:hasGeometry/geo:asWKT ?spWKT.
+        geo:hasGeometry/geo:asWKT ?spWKT;
+        spatial:connectedTo ?ar3.
+    {sample_region_filter}
     ?s2cell rdf:type kwg-ont:S2Cell_Level13.
     ?sample coso:fromSamplePoint ?samplePoint;
         dcterms:identifier ?sampleId;

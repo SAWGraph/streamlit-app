@@ -65,79 +65,136 @@ def main(context: AnalysisContext) -> None:
     # Get display name for selected code
     selected_industry_display = f"{selected_naics_code} - {NAICS_INDUSTRIES.get(selected_naics_code, 'Unknown')}" if selected_naics_code else "All Industries"
 
-    # Other parameters in a form
-    with st.sidebar.form(key=f"{analysis_key}_params_form"):
-        
-        # DETECTED CONCENTRATION
-        st.markdown("### 📊 Detected Concentration")
+    # Other parameters (outside a form so slider/input can live-sync)
+    st.sidebar.markdown("### 📊 Detected Concentration")
 
-        # Temporarily disable nondetect toggle for Nearby (performance).
-        include_nondetects = False
+    # Include nondetects option
+    include_nondetects_key = f"{analysis_key}_include_nondetects"
+    include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
+    if include_nondetects_key not in st.session_state:
+        st.session_state[include_nondetects_key] = False
+    if include_nondetects_pending_key not in st.session_state:
+        st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
 
-        max_limit = 500
+    include_nondetects = st.sidebar.checkbox(
+        "Include nondetects",
+        value=st.session_state[include_nondetects_pending_key],
+        key=f"{analysis_key}_nondetects_checkbox_pending",
+        help="Include observations flagged as non-detect (included alongside detected results in range)",
+    )
+    st.session_state[include_nondetects_pending_key] = include_nondetects
 
-        st.session_state[conc_min_key] = min(st.session_state[conc_min_key], max_limit)
-        st.session_state[conc_max_key] = min(st.session_state[conc_max_key], max_limit)
-        if st.session_state[conc_min_key] > st.session_state[conc_max_key]:
-            st.session_state[conc_max_key] = st.session_state[conc_min_key]
+    # Live sync behavior:
+    # - If BOTH inputs are <=500, keep inputs <-> slider in sync
+    # - If user types >500, stop syncing and use typed values
+    base_max_limit = 500
 
-        # Show current min/max boxes above the slider
-        min_col, max_col = st.columns(2)
-        min_col.number_input(
-            "Min (ng/L)",
-            value=st.session_state[conc_min_key],
-            min_value=0,
-            format="%d",
-            disabled=True,
-            key=f"{analysis_key}_concentration_min_display",
-            help="Minimum value reflected from the slider"
-        )
-        max_col.number_input(
-            "Max (ng/L)",
-            value=st.session_state[conc_max_key],
-            min_value=0,
-            format="%d",
-            disabled=True,
-            key=f"{analysis_key}_concentration_max_display",
-            help="Maximum value reflected from the slider"
-        )
+    # Applied values (used for query only when Execute is clicked)
+    applied_min = max(0, int(st.session_state[conc_min_key]))
+    applied_max = max(0, int(st.session_state[conc_max_key]))
+    if applied_min > applied_max:
+        applied_max = applied_min
+    st.session_state[conc_min_key] = applied_min
+    st.session_state[conc_max_key] = applied_max
 
-        # Range slider for concentration selection
-        # Using slider as primary control to avoid sync issues with form
-        slider_value = st.slider(
-            "Select concentration range (ng/L)",
-            min_value=0,
-            max_value=max_limit,
-            value=(st.session_state[conc_min_key], st.session_state[conc_max_key]),
-            step=1,
-            key=f"{analysis_key}_concentration_slider",
-            help="Drag to select min and max concentration in nanograms per liter"
+    min_pending_key = f"{analysis_key}_conc_min_pending"
+    max_pending_key = f"{analysis_key}_conc_max_pending"
+    slider_key = f"{analysis_key}_concentration_slider"
+    if min_pending_key not in st.session_state:
+        st.session_state[min_pending_key] = applied_min
+    if max_pending_key not in st.session_state:
+        st.session_state[max_pending_key] = applied_max
+    if slider_key not in st.session_state:
+        st.session_state[slider_key] = (
+            min(st.session_state[min_pending_key], base_max_limit),
+            min(st.session_state[max_pending_key], base_max_limit),
         )
 
-        # Extract slider values
-        min_concentration, max_concentration = slider_value
-
-        # Update session state
-        st.session_state[conc_min_key] = min_concentration
-        st.session_state[conc_max_key] = max_concentration
-
-        # Display selected range clearly
-        st.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
-
-        st.markdown("---")
-
-        # Execute button - both region and industry are now optional
-        execute_button = st.form_submit_button(
-            "🔍 Execute Query",
-            type="primary",
-            use_container_width=True,
-            help="Execute the nearby facilities analysis (optionally filter by region and/or industry)"
+    # Capture prior values BEFORE widgets update session_state (for reliable change detection)
+    prior_min = int(st.session_state.get(min_pending_key, applied_min))
+    prior_max = int(st.session_state.get(max_pending_key, applied_max))
+    prior_slider = tuple(
+        st.session_state.get(
+            slider_key,
+            (int(min(prior_min, base_max_limit)), int(min(prior_max, base_max_limit))),
         )
+    )
+
+    # Normalize pending (min<=max, non-negative)
+    st.session_state[min_pending_key] = max(0, int(st.session_state[min_pending_key]))
+    st.session_state[max_pending_key] = max(0, int(st.session_state[max_pending_key]))
+    if st.session_state[min_pending_key] > st.session_state[max_pending_key]:
+        st.session_state[max_pending_key] = st.session_state[min_pending_key]
+
+    # Inputs
+    min_col, max_col = st.sidebar.columns(2)
+    min_input = min_col.number_input(
+        "Min (ng/L)",
+        min_value=0,
+        step=1,
+        format="%d",
+        key=min_pending_key,
+    )
+    max_input = max_col.number_input(
+        "Max (ng/L)",
+        min_value=0,
+        step=1,
+        format="%d",
+        key=max_pending_key,
+    )
+
+    # Slider (always 0-500)
+    slider_value = st.sidebar.slider(
+        "Select concentration range (ng/L)",
+        min_value=0,
+        max_value=base_max_limit,
+        value=(
+            int(min(st.session_state[min_pending_key], base_max_limit)),
+            int(min(st.session_state[max_pending_key], base_max_limit)),
+        ),
+        step=1,
+        key=slider_key,
+    )
+
+    # Sync logic (only when both inputs are <=500)
+    min_input_i = int(min_input)
+    max_input_i = int(max_input)
+    slider_min_i, slider_max_i = map(int, slider_value)
+
+    if min_input_i <= base_max_limit and max_input_i <= base_max_limit:
+        # If slider moved, update inputs to slider
+        if (slider_min_i, slider_max_i) != tuple(prior_slider) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
+            st.session_state[min_pending_key] = slider_min_i
+            st.session_state[max_pending_key] = slider_max_i
+            st.rerun()
+        # If inputs changed, update slider to inputs
+        if (min_input_i, max_input_i) != (prior_min, prior_max) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
+            st.session_state[slider_key] = (min_input_i, max_input_i)
+            st.rerun()
+
+    # Values to use (typed wins automatically; if <=500 they'll be kept in sync)
+    min_concentration = max(0, int(st.session_state[min_pending_key]))
+    max_concentration = max(0, int(st.session_state[max_pending_key]))
+    if min_concentration > max_concentration:
+        max_concentration = min_concentration
+
+    st.sidebar.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
+    st.sidebar.markdown("---")
+
+    execute_button = st.sidebar.button(
+        "🔍 Execute Query",
+        type="primary",
+        use_container_width=True,
+        help="Execute the nearby facilities analysis (optionally filter by region and/or industry)",
+    )
 
     # Execute the query when form is submitted
     if execute_button:
-        # Nondetects temporarily disabled for Nearby
-        include_nondetects = False
+        # Apply pending values only on click
+        st.session_state[include_nondetects_key] = st.session_state.get(include_nondetects_pending_key, False)
+        include_nondetects = st.session_state[include_nondetects_key]
+        st.session_state[conc_min_key] = min_concentration
+        st.session_state[conc_max_key] = max_concentration
         region_boundary_df = None
         state_boundary_df = None
         county_boundary_df = None

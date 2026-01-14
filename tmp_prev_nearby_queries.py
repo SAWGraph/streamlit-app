@@ -302,49 +302,22 @@ def execute_sparql_query(endpoint: str, query: str, method: str = 'POST', timeou
         return None
 
 
-def _build_industry_values_clause(naics_codes: list[str]) -> tuple[str, str]:
+def _build_industry_values_clause(naics_codes: list[str]) -> str:
     """
-    Build industry filtering clauses (notebook style), including correct NAICS level handling.
-
-    Returns:
-      (values_clause, hierarchy_clause)
-    - values_clause: VALUES ... restricting the appropriate NAICS node.
-    - hierarchy_clause: additional fio:subcodeOf joins needed for sector/subsector filtering.
+    Build a VALUES clause for industry filtering (notebook style).
+    Returns empty string if no codes provided.
     """
     if not naics_codes:
-        return "", ""
-
-    code = str(naics_codes[0]).strip()
-    if not code:
-        return "", ""
-
-    # NAICS levels:
-    # - 2 digits: Sector
-    # - 3 digits: Subsector
-    # - 4 digits: Industry Group
-    # - 5-6 digits: Industry Code
+        return ""
+    
+    # For now, take the first code (UI typically selects one)
+    code = naics_codes[0]
+    
+    # Industry codes > 4 digits are specific codes, <= 4 are groups
     if len(code) > 4:
-        return f"VALUES ?industryCode {{naics:NAICS-{code}}}.", ""
-    if len(code) == 4:
-        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}.", ""
-    if len(code) == 3:
-        return (
-            f"VALUES ?industrySubsector {{naics:NAICS-{code}}}.",
-            "?industryGroup fio:subcodeOf ?industrySubsector .",
-        )
-    if len(code) == 2:
-        return (
-            f"VALUES ?industrySector {{naics:NAICS-{code}}}.",
-            "\n".join(
-                [
-                    "?industryGroup fio:subcodeOf ?industrySubsector .",
-                    "?industrySubsector fio:subcodeOf ?industrySector .",
-                ]
-            ),
-        )
-
-    # Fallback: treat as group
-    return f"VALUES ?industryGroup {{naics:NAICS-{code}}}.", ""
+        return f"VALUES ?industryCode {{naics:NAICS-{code}}}."
+    else:
+        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}."
 
 
 def execute_nearby_analysis(
@@ -382,7 +355,7 @@ def execute_nearby_analysis(
     print(f"{'='*60}\n")
     
     # Build industry filter using VALUES clause (notebook style)
-    industry_values, industry_hierarchy = _build_industry_values_clause(naics_codes)
+    industry_values = _build_industry_values_clause(naics_codes)
     
     # Build region filter (optional).
     # IMPORTANT: filter on the facility-connected county (not S2 cells), so state + county behave correctly.
@@ -428,7 +401,6 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     ?industryCode a naics:NAICS-IndustryCode;
                   fio:subcodeOf ?industryGroup;
                   rdfs:label ?industryName.
-    {industry_hierarchy}
     {industry_values}
 }}
 """
@@ -513,9 +485,7 @@ WHERE {{
                       fio:subcodeOf ?industryGroup;
                       rdfs:label ?industryName.
         {industry_values}
-        {industry_hierarchy}
         ?s2neighbor kwg-ont:sfTouches|owl:sameAs ?s2cell.
-        ?s2neighbor rdf:type kwg-ont:S2Cell_Level13 .
     }} }}
 
     ?sp rdf:type coso:SamplePoint;
