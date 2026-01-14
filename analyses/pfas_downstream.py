@@ -117,20 +117,28 @@ def main(context: AnalysisContext) -> None:
             min(st.session_state[max_pending_key], base_max_limit),
         )
 
-    # Capture prior values BEFORE widgets update session_state (for reliable change detection)
-    prior_min = int(st.session_state.get(min_pending_key, applied_min))
-    prior_max = int(st.session_state.get(max_pending_key, applied_max))
-    prior_slider = tuple(
-        st.session_state.get(
-            slider_key,
-            (int(min(prior_min, base_max_limit)), int(min(prior_max, base_max_limit))),
-        )
-    )
-
     st.session_state[min_pending_key] = max(0, int(st.session_state[min_pending_key]))
     st.session_state[max_pending_key] = max(0, int(st.session_state[max_pending_key]))
     if st.session_state[min_pending_key] > st.session_state[max_pending_key]:
         st.session_state[max_pending_key] = st.session_state[min_pending_key]
+
+    def _on_slider_change() -> None:
+        # Always sync slider -> inputs (slider is always within 0..500).
+        # This also lets the user “return” from >500 typed values back into slider mode
+        # by moving the slider.
+        smn, smx = st.session_state.get(slider_key, (0, 0))
+        st.session_state[min_pending_key] = int(smn)
+        st.session_state[max_pending_key] = int(smx)
+
+    def _on_minmax_change() -> None:
+        mn = max(0, int(st.session_state.get(min_pending_key, 0)))
+        mx = max(0, int(st.session_state.get(max_pending_key, 0)))
+        if mn > mx:
+            mx = mn
+        st.session_state[min_pending_key] = mn
+        st.session_state[max_pending_key] = mx
+        if mn <= base_max_limit and mx <= base_max_limit:
+            st.session_state[slider_key] = (mn, mx)
 
     min_col, max_col = st.sidebar.columns(2)
     min_input = min_col.number_input(
@@ -139,6 +147,7 @@ def main(context: AnalysisContext) -> None:
         step=1,
             format="%d",
         key=min_pending_key,
+        on_change=_on_minmax_change,
         )
     max_input = max_col.number_input(
             "Max (ng/L)",
@@ -146,6 +155,7 @@ def main(context: AnalysisContext) -> None:
         step=1,
             format="%d",
         key=max_pending_key,
+        on_change=_on_minmax_change,
         )
 
     slider_value = st.sidebar.slider(
@@ -159,20 +169,8 @@ def main(context: AnalysisContext) -> None:
             step=1,
         key=slider_key,
         help="Drag to select min and max concentration in nanograms per liter",
+        on_change=_on_slider_change,
     )
-
-    min_input_i = int(min_input)
-    max_input_i = int(max_input)
-    slider_min_i, slider_max_i = map(int, slider_value)
-
-    if min_input_i <= base_max_limit and max_input_i <= base_max_limit:
-        if (slider_min_i, slider_max_i) != tuple(prior_slider) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
-            st.session_state[min_pending_key] = slider_min_i
-            st.session_state[max_pending_key] = slider_max_i
-            st.rerun()
-        if (min_input_i, max_input_i) != (prior_min, prior_max) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
-            st.session_state[slider_key] = (min_input_i, max_input_i)
-            st.rerun()
 
     min_concentration = max(0, int(st.session_state[min_pending_key]))
     max_concentration = max(0, int(st.session_state[max_pending_key]))
@@ -277,16 +275,16 @@ def main(context: AnalysisContext) -> None:
                     st.success(f"✅ Step 1: Found {len(facilities_df)} facilities")
                 else:
                     st.warning("⚠️ Step 1: No facilities found")
-            
+
             with prog_col2:
                 with st.spinner("🔄 Step 2: Tracing downstream streams..."):
                     streams_df, step2_error, step2_debug = execute_downstream_streams_query(
                         naics_code=selected_naics_code,
                         region_code=context.region_code,
                     )
-                    debug_info["step2"] = step2_debug
-                    if step2_error:
-                        step_errors["step2"] = step2_error
+                debug_info["step2"] = step2_debug
+                if step2_error:
+                    step_errors["step2"] = step2_error
 
                 if step2_error:
                     st.error(f"❌ Step 2 failed: {step2_error}")
@@ -296,10 +294,12 @@ def main(context: AnalysisContext) -> None:
                         if "streamName" in streams_df.columns
                         else []
                     )
-                    st.success(f"✅ Step 2: Found {len(streams_df)} flowlines ({len(stream_names)} named streams)")
+                    st.success(
+                        f"✅ Step 2: Found {len(streams_df)} flowlines ({len(stream_names)} named streams)"
+                    )
                 else:
                     st.info("ℹ️ Step 2: No downstream flow paths found")
-            
+
             with prog_col3:
                 with st.spinner("🔄 Step 3: Finding downstream samples..."):
                     samples_df, step3_error, step3_debug = execute_downstream_samples_query(
@@ -309,9 +309,9 @@ def main(context: AnalysisContext) -> None:
                         max_conc=max_concentration,
                         include_nondetects=include_nondetects,
                     )
-                    debug_info["step3"] = step3_debug
-                    if step3_error:
-                        step_errors["step3"] = step3_error
+                debug_info["step3"] = step3_debug
+                if step3_error:
+                    step_errors["step3"] = step3_error
 
                 if step3_error:
                     st.error(f"❌ Step 3 failed: {step3_error}")
@@ -319,7 +319,7 @@ def main(context: AnalysisContext) -> None:
                     st.success(f"✅ Step 3: Found {len(samples_df)} downstream samples")
                 else:
                     st.info("ℹ️ Step 3: No downstream samples found")
-            
+
             st.session_state[results_key] = {
                 "facilities_df": facilities_df,
                 "streams_df": streams_df,

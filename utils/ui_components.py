@@ -127,15 +127,42 @@ def render_hierarchical_naics_selector(
 
         # Use st_ant_tree dropdown
         with st.sidebar if use_sidebar else st.container():
-            selected = st_ant_tree(
+            # Important: avoid checkbox-style selection unless explicitly requested.
+            # Some st_ant_tree versions don't support all kwargs (e.g., treeCheckStrictly).
+            # We progressively fall back to a smaller kwarg set to stay compatible.
+            kwargs = dict(
                 treeData=tree_data,
                 placeholder="Select Industry Type...",
                 allowClear=True,
                 showSearch=True,
                 treeLine=True,
                 defaultValue=default_val,
-                key=key
+                key=key,
             )
+            if multi_select:
+                kwargs.update(
+                    dict(
+                        multiple=True,
+                        treeCheckable=True,
+                        # best-effort; may not be supported in older versions
+                        treeCheckStrictly=True,
+                    )
+                )
+
+            try:
+                selected = st_ant_tree(**kwargs)
+            except TypeError:
+                # Retry without newer kwargs
+                for bad in ("treeCheckStrictly", "treeCheckable", "multiple"):
+                    if bad in kwargs:
+                        kwargs.pop(bad, None)
+                        try:
+                            selected = st_ant_tree(**kwargs)
+                            break
+                        except TypeError:
+                            continue
+                else:
+                    raise
 
         # Return selected code
         if selected and len(selected) > 0:

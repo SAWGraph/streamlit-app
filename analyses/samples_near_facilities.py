@@ -110,21 +110,31 @@ def main(context: AnalysisContext) -> None:
             min(st.session_state[max_pending_key], base_max_limit),
         )
 
-    # Capture prior values BEFORE widgets update session_state (for reliable change detection)
-    prior_min = int(st.session_state.get(min_pending_key, applied_min))
-    prior_max = int(st.session_state.get(max_pending_key, applied_max))
-    prior_slider = tuple(
-        st.session_state.get(
-            slider_key,
-            (int(min(prior_min, base_max_limit)), int(min(prior_max, base_max_limit))),
-        )
-    )
-
     # Normalize pending (min<=max, non-negative)
     st.session_state[min_pending_key] = max(0, int(st.session_state[min_pending_key]))
     st.session_state[max_pending_key] = max(0, int(st.session_state[max_pending_key]))
     if st.session_state[min_pending_key] > st.session_state[max_pending_key]:
         st.session_state[max_pending_key] = st.session_state[min_pending_key]
+
+    def _on_slider_change() -> None:
+        # Only sync slider -> inputs when both inputs are within slider range
+        mn = int(st.session_state.get(min_pending_key, 0))
+        mx = int(st.session_state.get(max_pending_key, 0))
+        if mn <= base_max_limit and mx <= base_max_limit:
+            smn, smx = st.session_state.get(slider_key, (mn, mx))
+            st.session_state[min_pending_key] = int(smn)
+            st.session_state[max_pending_key] = int(smx)
+
+    def _on_minmax_change() -> None:
+        # Always keep min/max sane; only sync inputs -> slider when <=500
+        mn = max(0, int(st.session_state.get(min_pending_key, 0)))
+        mx = max(0, int(st.session_state.get(max_pending_key, 0)))
+        if mn > mx:
+            mx = mn
+        st.session_state[min_pending_key] = mn
+        st.session_state[max_pending_key] = mx
+        if mn <= base_max_limit and mx <= base_max_limit:
+            st.session_state[slider_key] = (mn, mx)
 
     # Inputs
     min_col, max_col = st.sidebar.columns(2)
@@ -134,6 +144,7 @@ def main(context: AnalysisContext) -> None:
         step=1,
         format="%d",
         key=min_pending_key,
+        on_change=_on_minmax_change,
     )
     max_input = max_col.number_input(
         "Max (ng/L)",
@@ -141,6 +152,7 @@ def main(context: AnalysisContext) -> None:
         step=1,
         format="%d",
         key=max_pending_key,
+        on_change=_on_minmax_change,
     )
 
     # Slider (always 0-500)
@@ -154,23 +166,8 @@ def main(context: AnalysisContext) -> None:
         ),
         step=1,
         key=slider_key,
+        on_change=_on_slider_change,
     )
-
-    # Sync logic (only when both inputs are <=500)
-    min_input_i = int(min_input)
-    max_input_i = int(max_input)
-    slider_min_i, slider_max_i = map(int, slider_value)
-
-    if min_input_i <= base_max_limit and max_input_i <= base_max_limit:
-        # If slider moved, update inputs to slider
-        if (slider_min_i, slider_max_i) != tuple(prior_slider) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
-            st.session_state[min_pending_key] = slider_min_i
-            st.session_state[max_pending_key] = slider_max_i
-            st.rerun()
-        # If inputs changed, update slider to inputs
-        if (min_input_i, max_input_i) != (prior_min, prior_max) and (slider_min_i, slider_max_i) != (min_input_i, max_input_i):
-            st.session_state[slider_key] = (min_input_i, max_input_i)
-            st.rerun()
 
     # Values to use (typed wins automatically; if <=500 they'll be kept in sync)
     min_concentration = max(0, int(st.session_state[min_pending_key]))
