@@ -71,43 +71,36 @@ def main(context: AnalysisContext) -> None:
         else "Not Selected"
     )
 
+    # NOTE: Downstream tracing runs from ALL facilities that match the selected industry
+    # in the selected region (matches the notebook's "industry-driven" flow).
+
     # Other parameters in a form
     with st.sidebar.form(key=f"{analysis_key}_params_form"):
-        st.markdown("### 📊 Analysis Parameters")
-        
-        st.markdown(f"**Selected Industry:** {selected_industry_display}")
-        
-        st.markdown("---")
-        
-        # Region display
-        region_display = context.region_display or "Not Selected"
-        st.markdown(f"**Region:** {region_display}")
-        st.caption("_Required: Select state and county above_")
-        
-        st.markdown("---")
-        
         # DETECTED CONCENTRATION
         st.markdown("### 📊 Detected Concentration")
 
         # Include nondetects option (matches upstream/nearby behavior)
         include_nondetects_key = f"{analysis_key}_include_nondetects"
+        include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
         if include_nondetects_key not in st.session_state:
             st.session_state[include_nondetects_key] = False
+        if include_nondetects_pending_key not in st.session_state:
+            st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
         include_nondetects = st.checkbox(
             "Include nondetects",
-            value=st.session_state[include_nondetects_key],
-            key=f"{analysis_key}_nondetects_checkbox",
+            value=st.session_state[include_nondetects_pending_key],
+            key=f"{analysis_key}_nondetects_checkbox_pending",
             help="Include observations flagged as non-detect (included alongside detected results in range)",
         )
-        st.session_state[include_nondetects_key] = include_nondetects
-        
+        st.session_state[include_nondetects_pending_key] = include_nondetects
+
         max_limit = 500
-        
+
         st.session_state[conc_min_key] = min(st.session_state[conc_min_key], max_limit)
         st.session_state[conc_max_key] = min(st.session_state[conc_max_key], max_limit)
         if st.session_state[conc_min_key] > st.session_state[conc_max_key]:
             st.session_state[conc_max_key] = st.session_state[conc_min_key]
-        
+
         # Show current min/max boxes above the slider
         min_col, max_col = st.columns(2)
         min_col.number_input(
@@ -128,7 +121,7 @@ def main(context: AnalysisContext) -> None:
             key=f"{analysis_key}_concentration_max_display",
             help="Maximum value reflected from the slider"
         )
-        
+
         # Range slider for concentration selection
         slider_value = st.slider(
             "Select concentration range (ng/L)",
@@ -139,14 +132,14 @@ def main(context: AnalysisContext) -> None:
             key=f"{analysis_key}_concentration_slider",
             help="Drag to select min and max concentration in nanograms per liter"
         )
-        
+
         # Extract slider values
         min_concentration, max_concentration = slider_value
-        
+
         # Update session state
         st.session_state[conc_min_key] = min_concentration
         st.session_state[conc_max_key] = max_concentration
-        
+
         # Display selected range clearly
         st.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
         
@@ -179,6 +172,9 @@ def main(context: AnalysisContext) -> None:
     
     # Execute the query when form is submitted
     if execute_button:
+        # Apply pending nondetect selection only on submit
+        st.session_state[include_nondetects_key] = st.session_state.get(include_nondetects_pending_key, False)
+        include_nondetects = st.session_state[include_nondetects_key]
         # Validate all required fields
         missing_fields = []
         if not context.selected_state_code:
@@ -191,24 +187,31 @@ def main(context: AnalysisContext) -> None:
         if missing_fields:
             st.error(f"❌ **Missing required selections!** Please select: {', '.join(missing_fields)}")
         else:
-            params_data = []
-            params_data.append({
-                "Parameter": "Industry Type",
-                "Value": selected_industry_display
-            })
-            params_data.append({
-                "Parameter": "Geographic Region",
-                "Value": context.region_display or "All Regions"
-            })
-            params_data.append({
-                "Parameter": "Detected Concentration",
-                "Value": f"{min_concentration} - {max_concentration} ng/L"
-            })
-            params_data.append({
-                "Parameter": "Include nondetects",
-                "Value": "Yes" if include_nondetects else "No",
-            })
-            
+            # Always fetch region boundary for mapping (state/county boundary)
+            # Fetch both state + county boundaries (when available) so we can draw the
+            # correct border(s) regardless of whether the user selected only a state
+            # or both state+county. County is drawn on top of state.
+            state_boundary_df = (
+                get_region_boundary(context.selected_state_code) if context.selected_state_code else None
+            )
+            county_boundary_df = (
+                get_region_boundary(context.selected_county_code) if context.selected_county_code else None
+            )
+            region_boundary_df = (
+                county_boundary_df
+                if (county_boundary_df is not None and not county_boundary_df.empty)
+                else state_boundary_df
+            )
+
+            # Run the full notebook-style pipeline driven by industry:
+            step_errors = {}
+            debug_info = {}
+            params_data = [
+                {"Parameter": "Industry Type", "Value": selected_industry_display},
+                {"Parameter": "Geographic Region", "Value": context.region_display or "All Regions"},
+                {"Parameter": "Detected Concentration", "Value": f"{min_concentration} - {max_concentration} ng/L"},
+                {"Parameter": "Include nondetects", "Value": "Yes" if include_nondetects else "No"},
+            ]
             params_df = pd.DataFrame(params_data)
             
             st.markdown("---")
@@ -220,9 +223,6 @@ def main(context: AnalysisContext) -> None:
             streams_df = pd.DataFrame()
             samples_df = pd.DataFrame()
             
-            step_errors = {}
-            debug_info = {}
-            
             with prog_col1:
                 with st.spinner("🔄 Step 1: Finding facilities..."):
                     facilities_df, step1_error, step1_debug = execute_downstream_facilities_query(
@@ -233,8 +233,6 @@ def main(context: AnalysisContext) -> None:
                     if step1_error:
                         step_errors["step1"] = step1_error
                 
-                region_boundary_df = get_region_boundary(context.region_code)
-                
                 if step1_error:
                     st.error(f"❌ Step 1 failed: {step1_error}")
                 elif not facilities_df.empty:
@@ -243,39 +241,41 @@ def main(context: AnalysisContext) -> None:
                     st.warning("⚠️ Step 1: No facilities found")
             
             with prog_col2:
-                if not facilities_df.empty:
-                    with st.spinner("🔄 Step 2: Tracing downstream streams..."):
-                        streams_df, step2_error, step2_debug = execute_downstream_streams_query(
-                            naics_code=selected_naics_code,
-                            region_code=context.region_code,
-                        )
-                        debug_info["step2"] = step2_debug
-                        if step2_error:
-                            step_errors["step2"] = step2_error
-                    
-                    if step2_error:
-                        st.error(f"❌ Step 2 failed: {step2_error}")
-                    elif not streams_df.empty:
-                        stream_names = streams_df['streamName'].dropna().unique() if 'streamName' in streams_df.columns else []
-                        st.success(f"✅ Step 2: Found {len(streams_df)} flowlines ({len(stream_names)} named streams)")
-                    else:
-                        st.info("ℹ️ Step 2: No downstream flow paths found")
+                with st.spinner("🔄 Step 2: Tracing downstream streams..."):
+                    streams_df, step2_error, step2_debug = execute_downstream_streams_query(
+                        naics_code=selected_naics_code,
+                        region_code=context.region_code,
+                    )
+
+                debug_info["step2"] = step2_debug
+                if step2_error:
+                    step_errors["step2"] = step2_error
+
+                if step2_error:
+                    st.error(f"❌ Step 2 failed: {step2_error}")
+                elif not streams_df.empty:
+                    stream_names = (
+                        streams_df["streamName"].dropna().unique()
+                        if "streamName" in streams_df.columns
+                        else []
+                    )
+                    st.success(f"✅ Step 2: Found {len(streams_df)} flowlines ({len(stream_names)} named streams)")
                 else:
-                    st.info("⏭️ Step 2: Skipped (no facilities)")
+                    st.info("ℹ️ Step 2: No downstream flow paths found")
             
             with prog_col3:
-                if not facilities_df.empty:
-                    with st.spinner("🔄 Step 3: Finding downstream samples..."):
-                        samples_df, step3_error, step3_debug = execute_downstream_samples_query(
-                            naics_code=selected_naics_code,
-                            region_code=context.region_code,
-                            min_conc=min_concentration,
-                            max_conc=max_concentration,
-                            include_nondetects=include_nondetects,
-                        )
-                        debug_info["step3"] = step3_debug
-                        if step3_error:
-                            step_errors["step3"] = step3_error
+                with st.spinner("🔄 Step 3: Finding downstream samples..."):
+                    samples_df, step3_error, step3_debug = execute_downstream_samples_query(
+                        naics_code=selected_naics_code,
+                        region_code=context.region_code,
+                        min_conc=min_concentration,
+                        max_conc=max_concentration,
+                        include_nondetects=include_nondetects,
+                    )
+
+                debug_info["step3"] = step3_debug
+                if step3_error:
+                    step_errors["step3"] = step3_error
                     
                     if step3_error:
                         st.error(f"❌ Step 3 failed: {step3_error}")
@@ -283,19 +283,19 @@ def main(context: AnalysisContext) -> None:
                         st.success(f"✅ Step 3: Found {len(samples_df)} downstream samples")
                     else:
                         st.info("ℹ️ Step 3: No downstream samples found")
-                else:
-                    st.info("⏭️ Step 3: Skipped (no facilities)")
             
             st.session_state[results_key] = {
-                'facilities_df': facilities_df,
-                'streams_df': streams_df,
-                'samples_df': samples_df,
-                'step_errors': step_errors,
-                'debug_info': debug_info,
-                'region_boundary_df': region_boundary_df,
-                'params_df': params_df,
-                'query_region_code': context.region_code,
-                'selected_industry': selected_industry_display,
+                "facilities_df": facilities_df,
+                "streams_df": streams_df,
+                "samples_df": samples_df,
+                "step_errors": step_errors,
+                "debug_info": debug_info,
+                "region_boundary_df": region_boundary_df,
+                "state_boundary_df": state_boundary_df,
+                "county_boundary_df": county_boundary_df,
+                "params_df": params_df,
+                "query_region_code": context.region_code,
+                "selected_industry": selected_industry_display,
             }
             st.session_state[has_results_key] = True
     
@@ -308,6 +308,8 @@ def main(context: AnalysisContext) -> None:
         samples_df = results.get('samples_df')
         debug_info = results.get('debug_info')
         region_boundary_df = results.get('region_boundary_df')
+        state_boundary_df = results.get("state_boundary_df")
+        county_boundary_df = results.get("county_boundary_df")
         params_df = results.get('params_df')
         query_region_code = results.get('query_region_code')
         selected_industry = results.get('selected_industry')
@@ -425,140 +427,143 @@ def main(context: AnalysisContext) -> None:
             else:
                 map_obj = folium.Map(location=[39.8, -98.5], zoom_start=4)
             
-            # Add region boundary first (background layer)
-            if region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
+            # Add state + county boundaries (state first, then county on top)
+            boundary_layers = []
+            if state_boundary_df is not None and not state_boundary_df.empty:
+                boundary_layers.append(("State", state_boundary_df, "#000000"))
+            if county_boundary_df is not None and not county_boundary_df.empty:
+                boundary_layers.append(("County", county_boundary_df, "#666666"))
+
+            for region_type, bdf, color in boundary_layers:
                 try:
-                    boundary_wkt_val = region_boundary_df.iloc[0]['countyWKT']
-                    boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
+                    boundary_wkt_val = bdf.iloc[0]["countyWKT"]
+                    boundary_name = bdf.iloc[0].get("countyName", region_type)
                     boundary_gdf = gpd.GeoDataFrame(
-                        index=[0], crs="EPSG:4326", 
-                        geometry=[wkt.loads(boundary_wkt_val)]
+                        index=[0],
+                        crs="EPSG:4326",
+                        geometry=[wkt.loads(boundary_wkt_val)],
                     )
-                    
-                    # Determine boundary color based on region type
-                    region_code_len = len(str(query_region_code))
-                    if region_code_len > 5:
-                        boundary_color = '#FF0000'  # Red for subdivision
-                        region_type = "Subdivision"
-                    elif region_code_len == 5:
-                        boundary_color = '#666666'  # Gray for county
-                        region_type = "County"
-                    else:
-                        boundary_color = '#000000'  # Black for state
-                        region_type = "State"
-                    
                     folium.GeoJson(
                         boundary_gdf.to_json(),
-                        name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
-                        style_function=lambda x, color=boundary_color: {
-                            'fillColor': '#ffffff00',
-                            'color': color,
-                            'weight': 3,
-                            'fillOpacity': 0.0
-                        }
+                        name=f'<span style="color:{color};">📍 {region_type}: {boundary_name}</span>',
+                        style_function=lambda _x, c=color: {
+                            "fillColor": "#ffffff00",
+                            "color": c,
+                            "weight": 3,
+                            "fillOpacity": 0.0,
+                        },
                     ).add_to(map_obj)
                 except Exception as e:
-                    st.warning(f"Could not display region boundary: {e}")
+                    st.warning(f"Could not display {region_type.lower()} boundary: {e}")
             
-            # Add samples layer (so it's on top)
+            # Add samples layer (notebook-style: scaled radius + popup=True)
             if samples_gdf is not None and not samples_gdf.empty:
-                # Scale point size based on Max concentration
-                def get_radius(row):
-                    max_val = row.get('Max')
-                    if max_val in [None, 'non-detect', 'http://w3id.org/coso/v1/contaminoso#non-detect']:
-                        return 5
+                # Notebook-style marker scaling:
+                # - non-detect -> small marker w/ black outline
+                # - detected < 40 -> small marker
+                # - detected < 160 -> scale value/8
+                # - detected >= 160 -> cap at 25
+                def _sample_style(feature):
+                    props = (feature or {}).get("properties", {}) or {}
+                    max_val = props.get("Max")
+
+                    # Determine non-detect
+                    is_nondetect = False
+                    if max_val in ["non-detect", "http://w3id.org/coso/v1/contaminoso#non-detect"]:
+                        is_nondetect = True
+                    else:
+                        try:
+                            is_nondetect = float(max_val) == 0
+                        except Exception:
+                            is_nondetect = False
+
+                    # Radius scaling
+                    # Clamp radius to keep markers readable (prevents huge circles).
+                    radius = 4
+                    if not is_nondetect:
+                        try:
+                            v = float(max_val)
+                            if v < 40:
+                                radius = 4
+                            elif v < 160:
+                                # gentler scaling than notebook to avoid oversized markers
+                                radius = v / 16
+                            else:
+                                radius = 12
+                        except Exception:
+                            radius = 4
+
+                    # final clamp
                     try:
-                        max_float = float(max_val)
-                        if max_float < 40:
-                            return 5
-                        elif max_float < 160:
-                            return max_float / 8
-                        else:
-                            return 25
-                    except:
-                        return 5
-                
+                        radius = float(radius)
+                    except Exception:
+                        radius = 4
+                    radius = max(3, min(12, radius))
+
+                    return {
+                        "radius": radius,
+                        "opacity": 0.3,
+                        "color": "Black" if is_nondetect else "DimGray",
+                    }
+
                 samples_gdf.explore(
                     m=map_obj,
-                    name=f'<span style="color:DarkOrange;">🧪 Downstream Samples ({len(samples_gdf)})</span>',
-                    color='DarkOrange',
+                    name=f'<span style="color:DarkOrange;">Samples</span>',
+                    color="DarkOrange",
                     marker_kwds=dict(radius=6),
-                    marker_type='circle_marker',
-                    popup=['samplePoint', 'Max', 'resultCount', 'results'] if all(c in samples_gdf.columns for c in ['samplePoint', 'Max', 'resultCount']) else True,
-                    popup_kwds={'max_height': 500},
-                    style_kwds=dict(fillOpacity=0.7, opacity=0.8)
+                    marker_type="circle_marker",
+                    popup=True,
+                    popup_kwds={"max_height": 500},
+                    style_kwds=dict(style_function=_sample_style),
                 )
             
-            # Add streams layer
+            # Add streams layer (notebook-style popup fields)
             if streams_gdf is not None and not streams_gdf.empty:
+                if "downstream_flowline" in streams_gdf.columns:
+                    streams_gdf["downstream_flowline"] = streams_gdf["downstream_flowline"].apply(
+                        lambda x: f'<a href="{x}" target="_blank">{x}</a>' if x else x
+                    )
+                stream_popup = [c for c in ["streamName", "fl_type", "downstream_flowline"] if c in streams_gdf.columns]
                 streams_gdf.explore(
                     m=map_obj,
-                    name=f'<span style="color:LightSkyBlue;">🌊 Downstream Streams</span>',
-                    color='LightSkyBlue',
-                    style_kwds=dict(weight=2, opacity=0.5),
-                    popup=['streamName', 'fl_type'] if all(c in streams_gdf.columns for c in ['streamName', 'fl_type']) else False,
-                    popup_kwds={'max_width': 350}
+                    name=f'<span style="color:LightSkyBlue;">Streams</span>',
+                    color="LightSkyBlue",
+                    popup=stream_popup if stream_popup else True,
+                    popup_kwds={"max_width": 350},
                 )
             
-            # Add facilities layer with different colors by industry type
+            # Add facilities layer (notebook-style: separate layer per industryName w/ color list)
             if facilities_gdf is not None and not facilities_gdf.empty:
-                # Important UX: do NOT create one LayerControl entry per industry
-                # (it produces an unhideable full-height list overlaying the map).
-                # Instead, add all facilities into a single FeatureGroup layer.
-                facilities_layer = folium.FeatureGroup(
-                    name=f'<span style="color:Purple;">🏭 Facilities ({len(facilities_gdf)})</span>',
-                    show=True,
-                )
-                facilities_layer.add_to(map_obj)
-
                 colors = [
-                    'Purple', 'PaleVioletRed', 'Orchid', 'Fuchsia', 'MediumVioletRed',
-                    'HotPink', 'LightPink', 'red', 'MidnightBlue', 'MediumBlue',
-                    'SlateBlue', 'DodgerBlue', 'DeepSkyBlue', 'SkyBlue', 'CadetBlue'
+                    "Purple", "PaleVioletRed", "Orchid", "Fuchsia", "MediumVioletRed", "HotPink", "LightPink",
+                    "red", "lightred", "pink", "orange",
+                    "MidnightBlue", "MediumBlue", "SlateBlue", "MediumSlateBlue", "DodgerBlue", "DeepSkyBlue",
+                    "SkyBlue", "CadetBlue", "DarkCyan", "LightSeaGreen",
+                    "lightblue", "gray", "blue", "darkred", "lightgreen", "green", "darkblue", "darkpurple",
+                    "cadetblue", "lightgray", "darkgreen",
                 ]
 
-                has_industry = 'industryName' in facilities_gdf.columns
-                industry_to_color = {}
-                if has_industry:
-                    for i, industry in enumerate(sorted(facilities_gdf['industryName'].dropna().unique())):
-                        industry_to_color[industry] = colors[i % len(colors)]
-
-                for row in facilities_gdf.itertuples(index=False):
-                    try:
-                        geom = getattr(row, "geometry", None)
-                        if geom is None:
-                            continue
-                        lat, lon = float(geom.y), float(geom.x)
-                    except Exception:
-                        continue
-
-                    industry_name = getattr(row, "industryName", None) if has_industry else None
-                    marker_color = industry_to_color.get(industry_name, "Purple")
-
-                    facility_name = getattr(row, "facilityName", None)
-                    facility_link = getattr(row, "facility_link", None)
-
-                    popup_bits = []
-                    if facility_name:
-                        popup_bits.append(f"<b>{facility_name}</b>")
-                    if industry_name:
-                        popup_bits.append(f"{industry_name}")
-                    if facility_link:
-                        popup_bits.append(f"{facility_link}")
-                    popup_html = "<br>".join(popup_bits) if popup_bits else "Facility"
-
-                    folium.CircleMarker(
-                        location=(lat, lon),
-                        radius=5,
-                        color="DimGray",
-                        weight=1,
-                        fill=True,
-                        fill_color=marker_color,
-                        fill_opacity=0.85,
-                        popup=folium.Popup(popup_html, max_width=350),
-                    ).add_to(facilities_layer)
+                if "industryName" in facilities_gdf.columns and facilities_gdf["industryName"].notna().any():
+                    unique_industries = list(sorted(facilities_gdf["industryName"].dropna().unique()))
+                    for i, industry in enumerate(unique_industries):
+                        c = colors[i % len(colors)]
+                        facilities_gdf[facilities_gdf["industryName"] == industry].explore(
+                            m=map_obj,
+                            name=f'<span style="color:{c};">{industry}</span>',
+                            color=c,
+                            marker_kwds=dict(radius=3),
+                            popup=[x for x in ["facility_link", "facilityName", "industryName"] if x in facilities_gdf.columns],
+                        )
+                else:
+                    facilities_gdf.explore(
+                    m=map_obj,
+                        name=f'<span style="color:Purple;">Facilities</span>',
+                        color="Purple",
+                        marker_kwds=dict(radius=3),
+                        popup=[x for x in ["facility_link", "facilityName"] if x in facilities_gdf.columns] or True,
+                    )
             
-            # Add layer control
+            # Hide legend by default (consistent with other analyses in the app)
             folium.LayerControl(collapsed=True).add_to(map_obj)
             
             # Wrap in Figure for consistent sizing

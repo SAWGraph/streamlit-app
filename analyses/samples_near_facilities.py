@@ -72,17 +72,21 @@ def main(context: AnalysisContext) -> None:
         st.markdown("### 📊 Detected Concentration")
 
         # Include nondetects option
+        # Use a "pending" key so toggling doesn't affect the applied value until Execute is clicked.
         include_nondetects_key = f"{analysis_key}_include_nondetects"
+        include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
         if include_nondetects_key not in st.session_state:
             st.session_state[include_nondetects_key] = False
+        if include_nondetects_pending_key not in st.session_state:
+            st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
 
         include_nondetects = st.checkbox(
             "Include nondetects",
-            value=st.session_state[include_nondetects_key],
-            key=f"{analysis_key}_nondetects_checkbox",
+            value=st.session_state[include_nondetects_pending_key],
+            key=f"{analysis_key}_nondetects_checkbox_pending",
             help="Include observations with zero concentration or nondetect flags"
         )
-        st.session_state[include_nondetects_key] = include_nondetects
+        st.session_state[include_nondetects_pending_key] = include_nondetects
 
         max_limit = 500
 
@@ -146,7 +150,12 @@ def main(context: AnalysisContext) -> None:
 
     # Execute the query when form is submitted
     if execute_button:
+        # Apply pending nondetect selection only on submit
+        st.session_state[include_nondetects_key] = st.session_state.get(include_nondetects_pending_key, False)
+        include_nondetects = st.session_state[include_nondetects_key]
         region_boundary_df = None
+        state_boundary_df = None
+        county_boundary_df = None
         with st.spinner(f"Searching for samples near {selected_industry_display}..."):
             # Execute the consolidated analysis (single query)
             facilities_df, samples_df = execute_nearby_analysis(
@@ -156,7 +165,18 @@ def main(context: AnalysisContext) -> None:
                 max_concentration=max_concentration,
                 include_nondetects=include_nondetects
             )
-            region_boundary_df = get_region_boundary(context.region_code)
+            # Fetch both state + county boundaries when available; county drawn on top.
+            state_boundary_df = (
+                get_region_boundary(context.selected_state_code) if context.selected_state_code else None
+            )
+            county_boundary_df = (
+                get_region_boundary(context.selected_county_code) if context.selected_county_code else None
+            )
+            region_boundary_df = (
+                county_boundary_df
+                if (county_boundary_df is not None and not county_boundary_df.empty)
+                else state_boundary_df
+            )
             
             # Store results in session state
             st.session_state[facilities_key] = facilities_df
@@ -164,6 +184,8 @@ def main(context: AnalysisContext) -> None:
             st.session_state[industry_key] = selected_industry_display
             st.session_state[region_code_key] = context.region_code
             st.session_state[f"{analysis_key}_region_boundary_df"] = region_boundary_df
+            st.session_state[f"{analysis_key}_state_boundary_df"] = state_boundary_df
+            st.session_state[f"{analysis_key}_county_boundary_df"] = county_boundary_df
             st.session_state[executed_key] = True
     
     # Display Results
@@ -172,6 +194,8 @@ def main(context: AnalysisContext) -> None:
         samples_df = st.session_state.get(samples_key, pd.DataFrame())
         industry_display = st.session_state.get(industry_key, '')
         region_boundary_df = st.session_state.get(f"{analysis_key}_region_boundary_df")
+        state_boundary_df = st.session_state.get(f"{analysis_key}_state_boundary_df")
+        county_boundary_df = st.session_state.get(f"{analysis_key}_county_boundary_df")
         
         st.markdown("---")
         st.markdown("### 📊 Results")
@@ -205,37 +229,39 @@ def main(context: AnalysisContext) -> None:
                         # Create map
                         map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
                         
-                        # Add region boundary if available
+                        # Add state + county boundaries (state first, then county on top)
                         query_region_code = st.session_state.get(region_code_key)
-                        if region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
-                            boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
-                            boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
-                            boundary_gdf = gpd.GeoDataFrame(
-                                index=[0], crs="EPSG:4326", 
-                                geometry=[wkt.loads(boundary_wkt)]
-                            )
-                            
-                            # Determine boundary color based on region type
+                        boundary_layers = []
+                        if state_boundary_df is not None and not state_boundary_df.empty:
+                            boundary_layers.append(("State", state_boundary_df, "#000000"))
+                        if county_boundary_df is not None and not county_boundary_df.empty:
+                            boundary_layers.append(("County", county_boundary_df, "#666666"))
+
+                        # Fallback to the single region boundary if present
+                        if not boundary_layers and region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
                             region_code_len = len(str(query_region_code))
-                            if region_code_len > 5:
-                                boundary_color = '#FF0000'  # Red for subdivision
-                                region_type = "Subdivision"
-                            elif region_code_len == 5:
-                                boundary_color = '#666666'  # Gray for county
-                                region_type = "County"
+                            if region_code_len == 5:
+                                boundary_layers.append(("County", region_boundary_df, "#666666"))
                             else:
-                                boundary_color = '#000000'  # Black for state
-                                region_type = "State"
-                            
+                                boundary_layers.append(("State", region_boundary_df, "#000000"))
+
+                        for region_type, bdf, boundary_color in boundary_layers:
+                            boundary_wkt = bdf.iloc[0]["countyWKT"]
+                            boundary_name = bdf.iloc[0].get("countyName", region_type)
+                            boundary_gdf = gpd.GeoDataFrame(
+                                index=[0],
+                                crs="EPSG:4326",
+                                geometry=[wkt.loads(boundary_wkt)],
+                            )
                             folium.GeoJson(
                                 boundary_gdf.to_json(),
                                 name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
-                                style_function=lambda x, color=boundary_color: {
-                                    'fillColor': '#ffffff00',
-                                    'color': color,
-                                    'weight': 3,
-                                    'fillOpacity': 0.0
-                                }
+                                style_function=lambda _x, c=boundary_color: {
+                                    "fillColor": "#ffffff00",
+                                    "color": c,
+                                    "weight": 3,
+                                    "fillOpacity": 0.0,
+                                },
                             ).add_to(map_obj)
                         
                         # Add facilities (blue markers)

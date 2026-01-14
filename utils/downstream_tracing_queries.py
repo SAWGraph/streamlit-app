@@ -116,6 +116,37 @@ def _build_region_filter(region_code: Optional[str]) -> str:
         return ""
 
 
+def _build_facility_values(facility_uris: Optional[List[str]]) -> str:
+    """
+    Build SPARQL VALUES clause for filtering to specific facility URIs.
+
+    Expects full HTTP(S) URIs (e.g., "http://w3id.org/fio/v1/epa-frs-data#d.FRS-Facility.110000000000").
+    """
+    if not facility_uris:
+        return ""
+
+    cleaned: List[str] = []
+    for uri in facility_uris:
+        if not uri:
+            continue
+        u = str(uri).strip()
+        if not u:
+            continue
+        # Ensure it's wrapped as an IRI, not treated as a prefixed name / literal
+        if u.startswith("<") and u.endswith(">"):
+            cleaned.append(u)
+        elif u.startswith("http://") or u.startswith("https://"):
+            cleaned.append(f"<{u}>")
+        else:
+            # Skip anything that doesn't look like an IRI to avoid malformed SPARQL
+            continue
+
+    if not cleaned:
+        return ""
+
+    return f"VALUES ?facility {{ {' '.join(cleaned)} }}."
+
+
 def execute_downstream_facilities_query(
     naics_code: Optional[str],
     region_code: Optional[str],
@@ -171,6 +202,7 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
 def execute_downstream_streams_query(
     naics_code: Optional[str],
     region_code: Optional[str],
+    facility_uris: Optional[List[str]] = None,
     timeout: int = 180,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """
@@ -181,10 +213,15 @@ def execute_downstream_streams_query(
     Returns:
         DataFrame with columns: downstream_flowline, dsflWKT, fl_type, streamName
     """
+    facility_values = _build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
     region_filter = _build_region_filter(region_code)
-    
-    if not industry_filter:
+
+    # If a facility is provided, we trace from that facility directly (not from the whole industry set).
+    if facility_values:
+        industry_filter = ""
+        region_filter = ""
+    elif not industry_filter:
         return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
     
     query = f"""
@@ -208,6 +245,7 @@ SELECT DISTINCT ?downstream_flowline ?dsflWKT ?fl_type ?streamName
 WHERE {{
     {{SELECT ?s2neighbor WHERE {{
         ?s2neighbor kwg-ont:sfContains ?facility.
+        {facility_values}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
             spatial:connectedTo ?county.
@@ -241,6 +279,7 @@ WHERE {{
 def execute_downstream_samples_query(
     naics_code: Optional[str],
     region_code: Optional[str],
+    facility_uris: Optional[List[str]] = None,
     min_conc: float = 0.0,
     max_conc: float = 500.0,
     include_nondetects: bool = False,
@@ -261,10 +300,15 @@ def execute_downstream_samples_query(
     Returns:
         DataFrame with columns: samplePoint, spWKT, sample, samples, resultCount, Max, unit, results
     """
+    facility_values = _build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
     region_filter = _build_region_filter(region_code)
-    
-    if not industry_filter:
+
+    # If a facility is provided, we trace from that facility directly (not from the whole industry set).
+    if facility_values:
+        industry_filter = ""
+        region_filter = ""
+    elif not industry_filter:
         return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
     
     # Build concentration filter.
@@ -311,6 +355,7 @@ SELECT DISTINCT ?samplePoint ?spWKT ?sample
 WHERE {{
     {{ SELECT DISTINCT ?s2cell WHERE {{
         ?s2neighbor kwg-ont:sfContains ?facility.
+        {facility_values}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
             spatial:connectedTo ?county.

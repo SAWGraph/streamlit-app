@@ -16,6 +16,8 @@ folium>=0.12
 geopandas
 pandas
 shapely
+requests
+certifi
 SPARQLWrapper
 rdflib
 matplotlib
