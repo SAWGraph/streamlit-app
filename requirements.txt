@@ -8,10 +8,10 @@
 # rdflib>=6.3.0
 # branca>=0.6.0
 # certifi>=2023.0.0
-streamlit
-streamlit-folium
+streamlit==1.45.1
+streamlit-folium==0.25.3
 streamlit-searchbox
-st-ant-tree
+st-ant-tree==0.0.15
 folium>=0.12
 geopandas
 pandas
