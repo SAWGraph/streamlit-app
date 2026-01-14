@@ -473,6 +473,8 @@ def main(context: AnalysisContext) -> None:
             try:
                 popup_css = """
 <style>
+.leaflet-popup { max-width: 920px !important; }
+.leaflet-popup-content-wrapper { max-width: 920px !important; }
 .leaflet-popup-content { min-width: 420px !important; max-width: 900px !important; width: auto !important; }
 .leaflet-popup-content table { width: 100% !important; table-layout: auto; }
 .leaflet-popup-content td, .leaflet-popup-content th {
@@ -481,6 +483,8 @@ def main(context: AnalysisContext) -> None:
 }
 /* Ensure long URLs wrap instead of overflowing */
 .leaflet-popup-content a {
+  display: inline-block;
+  max-width: 100%;
   overflow-wrap: anywhere;
   white-space: normal !important;
 }
@@ -597,6 +601,29 @@ def main(context: AnalysisContext) -> None:
             
             # Add facilities layer (notebook-style: separate layer per industryName w/ color list)
             if facilities_gdf is not None and not facilities_gdf.empty:
+                # Short, clickable FRS link (prevents huge URIs from blowing up popups)
+                if "facility" in facilities_gdf.columns:
+                    def _frs_id_from_uri(u: str) -> str:
+                        try:
+                            return str(u).split(".")[-1]
+                        except Exception:
+                            return str(u)
+
+                    facilities_gdf["facility_frs_id"] = facilities_gdf["facility"].apply(_frs_id_from_uri)
+                    facilities_gdf["facility_link"] = facilities_gdf["facility_frs_id"].apply(
+                        lambda rid: (
+                            f'<a href="https://frs-public.epa.gov/ords/frs_public2/fii_query_detail.disp_program_facility?p_registry_id={rid}" target="_blank">FRS {rid}</a>'
+                            if rid
+                            else rid
+                        )
+                    )
+
+                # Curated fields: use same set for hover + click
+                facility_popup_fields = [
+                    c
+                    for c in ["facility_link", "facilityName", "industryName", "industryCode"]
+                    if c in facilities_gdf.columns
+                ]
                 colors = [
                     "Purple", "PaleVioletRed", "Orchid", "Fuchsia", "MediumVioletRed", "HotPink", "LightPink",
                     "red", "lightred", "pink", "orange",
@@ -615,8 +642,9 @@ def main(context: AnalysisContext) -> None:
                             name=f'<span style="color:{c};">{industry}</span>',
                             color=c,
                             marker_kwds=dict(radius=3),
-                            # Ensure click popup shows the same rich set of fields as hover (geopandas default)
-                            popup=True,
+                            tooltip=facility_popup_fields if facility_popup_fields else True,
+                            popup=facility_popup_fields if facility_popup_fields else True,
+                            popup_kwds={"max_width": 900, "parse_html": True},
                         )
                 else:
                     facilities_gdf.explore(
@@ -624,8 +652,9 @@ def main(context: AnalysisContext) -> None:
                         name=f'<span style="color:Purple;">Facilities</span>',
                         color="Purple",
                         marker_kwds=dict(radius=3),
-                        # Ensure click popup shows the same rich set of fields as hover (geopandas default)
-                        popup=True,
+                        tooltip=facility_popup_fields if facility_popup_fields else True,
+                        popup=facility_popup_fields if facility_popup_fields else True,
+                        popup_kwds={"max_width": 900, "parse_html": True},
                     )
             
             # Hide legend by default (consistent with other analyses in the app)
