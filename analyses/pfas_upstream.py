@@ -169,17 +169,21 @@ def main(context: AnalysisContext) -> None:
         st.markdown("### 📊 Detected Concentration")
 
         # Include nondetects option
+        # Use a "pending" key so toggling doesn't affect the applied value until Execute is clicked.
         include_nondetects_key = f"{analysis_key}_include_nondetects"
+        include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
         if include_nondetects_key not in st.session_state:
             st.session_state[include_nondetects_key] = False
+        if include_nondetects_pending_key not in st.session_state:
+            st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
 
         include_nondetects = st.checkbox(
             "Include nondetects",
-            value=st.session_state[include_nondetects_key],
-            key=f"{analysis_key}_nondetects_checkbox",
+            value=st.session_state[include_nondetects_pending_key],
+            key=f"{analysis_key}_nondetects_checkbox_pending",
             help="Include observations with zero concentration or nondetect flags"
         )
-        st.session_state[include_nondetects_key] = include_nondetects
+        st.session_state[include_nondetects_pending_key] = include_nondetects
 
         max_limit = 500
 
@@ -246,6 +250,9 @@ def main(context: AnalysisContext) -> None:
     # Display query parameters when Execute button is clicked
     # Logic to handle query execution and result persistence
     if execute_button:
+        # Apply pending nondetect selection only on submit
+        st.session_state[include_nondetects_key] = st.session_state.get(include_nondetects_pending_key, False)
+        include_nondetects = st.session_state[include_nondetects_key]
         # Validate required parameters
         if not context.selected_state_code:
             st.error("❌ **State selection is required!** Please select a state before executing the query.")
@@ -307,8 +314,19 @@ def main(context: AnalysisContext) -> None:
                 if samples_df is None:
                     samples_df = pd.DataFrame()
 
-                # Also query the region boundary for mapping
-                region_boundary_df = get_region_boundary(context.region_code)
+                # Fetch both state + county boundaries when available; county drawn on top.
+                state_boundary_df = (
+                    get_region_boundary(context.selected_state_code) if context.selected_state_code else None
+                )
+                county_boundary_df = (
+                    get_region_boundary(context.selected_county_code) if context.selected_county_code else None
+                )
+                # Keep existing key for backward compatibility, but prefer the most specific.
+                region_boundary_df = (
+                    county_boundary_df
+                    if (county_boundary_df is not None and not county_boundary_df.empty)
+                    else state_boundary_df
+                )
 
                 if step1_error:
                     st.error(f"❌ Step 1 failed: {step1_error}")
@@ -375,6 +393,8 @@ def main(context: AnalysisContext) -> None:
                 'combined_error': combined_error,
                 'debug_info': debug_info,
                 'region_boundary_df': region_boundary_df,
+                'state_boundary_df': state_boundary_df,
+                'county_boundary_df': county_boundary_df,
                 'params_df': params_df,
                 'query_region_code': context.region_code,
                 'selected_material_name': selected_material_name
@@ -393,6 +413,8 @@ def main(context: AnalysisContext) -> None:
         combined_error = results.get('combined_error')
         debug_info = results.get('debug_info')
         region_boundary_df = results.get('region_boundary_df')
+        state_boundary_df = results.get('state_boundary_df')
+        county_boundary_df = results.get('county_boundary_df')
         params_df = results.get('params_df')
         query_region_code = results.get('query_region_code')
         saved_material_name = results.get('selected_material_name')
@@ -617,54 +639,38 @@ def main(context: AnalysisContext) -> None:
                     # Default to US center
                     map_obj = folium.Map(location=[39.8, -98.5], zoom_start=4)
             
-                # Add administrative boundary if available (from SPARQL query)
-                if region_boundary_df is not None and not region_boundary_df.empty:
+                # Add state + county boundaries if available (state first, then county on top)
+                boundary_layers = []
+                if state_boundary_df is not None and not state_boundary_df.empty:
+                    boundary_layers.append(("State", state_boundary_df, "#444444"))
+                if county_boundary_df is not None and not county_boundary_df.empty:
+                    boundary_layers.append(("County", county_boundary_df, "#666666"))
+
+                for region_type, bdf, boundary_color in boundary_layers:
                     try:
-                        # Get boundary info from the query result
-                        boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
-                        boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
-                        
-                        # Convert WKT to GeoDataFrame
+                        boundary_wkt = bdf.iloc[0]["countyWKT"]
+                        boundary_name = bdf.iloc[0].get("countyName", region_type)
                         from shapely import wkt as shapely_wkt
                         boundary_geom = shapely_wkt.loads(boundary_wkt)
-                        boundary_gdf = gpd.GeoDataFrame([{
-                            'name': boundary_name,
-                            'geometry': boundary_geom
-                        }], crs='EPSG:4326')
-                        
-                        # Determine boundary color based on region type
-                        region_code_len = len(str(query_region_code))
-                        if region_code_len > 5:
-                            # Subdivision - use same gray as county
-                            boundary_color = '#666666'
-                            region_type = "Subdivision"
-                        elif region_code_len == 5:
-                            # County - gray
-                            boundary_color = '#666666'
-                            region_type = "County"
-                        else:
-                            # State - dark gray
-                            boundary_color = '#444444'
-                            region_type = "State"
-                        
-                        # Add boundary to map
+                        boundary_gdf = gpd.GeoDataFrame(
+                            [{"name": boundary_name, "geometry": boundary_geom}],
+                            crs="EPSG:4326",
+                        )
                         boundary_gdf.explore(
                             m=map_obj,
-                            name=f'<span style="color:{boundary_color};">📍 {boundary_name} Boundary</span>',
+                            name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
                             color=boundary_color,
                             style_kwds=dict(
-                                fillColor='none',
+                                fillColor="none",
                                 weight=3,
                                 opacity=0.8,
-                                dashArray='5, 5'
+                                dashArray="5, 5",
                             ),
                             overlay=True,
-                            show=True
+                            show=True,
                         )
                     except Exception as e:
-                        # If boundary display fails, just continue without it
-                        print(f"Error displaying boundary: {e}")
-                        pass
+                        print(f"Error displaying {region_type.lower()} boundary: {e}")
             
                 # Add upstream flow lines (blue lines)
                 if flowlines_gdf is not None and not flowlines_gdf.empty:

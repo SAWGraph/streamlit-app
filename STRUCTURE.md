@@ -4,7 +4,7 @@
 
 ```
 streamlit/
-├── app.py                          # Main Streamlit app (single-page UI + analysis flows)
+├── app.py                          # Streamlit entrypoint (modular)
 ├── analysis_registry.py            # Registry + AnalysisContext for modular analyses
 ├── requirements.txt
 ├── README.md
@@ -55,9 +55,9 @@ The app opens in your browser (usually `http://localhost:8501`).
 
 ## Architecture (Current)
 
-- **`app.py` is the active entrypoint** and contains the main UI, region selection, and analysis flows.
+- **`app.py` is the entrypoint** and runs analyses via `analysis_registry.py`.
 - Analysis results are stored in `st.session_state` and only update in the main panel after an explicit **Execute** click.
-- **`analysis_registry.py` + `analyses/`** provide a modular analysis API (`AnalysisContext`) that mirrors the app logic and can be wired into a registry-based entrypoint.
+- **`analysis_registry.py` + `analyses/`** provide the modular analysis API (`AnalysisContext`) and runners used by `app.py`.
 
 ## AnalysisContext (Modular Analyses)
 

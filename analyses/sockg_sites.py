@@ -177,6 +177,7 @@ def main(context: AnalysisContext) -> None:
                 )
 
         if region_boundary_df is not None and not region_boundary_df.empty:
+            # `get_region_boundary` returns columns named countyWKT/countyName even for states.
             boundary_wkt = region_boundary_df.iloc[0]["countyWKT"]
             boundary_name = region_boundary_df.iloc[0].get("countyName", "State")
             boundary_gdf = gpd.GeoDataFrame(
