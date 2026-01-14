@@ -12,19 +12,7 @@ from shapely import wkt
 from streamlit_folium import st_folium
 
 from analysis_registry import AnalysisContext
-from utils.sockg_queries import get_sockg_state_codes, get_sockg_locations, get_sockg_facilities
-
-
-def _build_sockg_state_options(states_df: pd.DataFrame) -> list[str]:
-    sockg_codes = get_sockg_state_codes()
-    if sockg_codes.empty:
-        return ["-- All States --"]
-
-    allowed = set(sockg_codes["fips_code"].astype(str).str.zfill(2).tolist())
-    subset = states_df[
-        states_df["fipsCode"].astype(str).str.zfill(2).isin(allowed)
-    ].sort_values("state_name")
-    return ["-- All States --"] + subset["state_name"].tolist()
+from utils.sockg_queries import get_sockg_locations, get_sockg_facilities
 
 
 def main(context: AnalysisContext) -> None:
@@ -34,25 +22,17 @@ def main(context: AnalysisContext) -> None:
     - Retrieves SOCKG locations (ARS sites)
     - Finds nearby facilities and flags PFAS-related industries
 
-    **State filter:** Optional (limited to states with SOCKG sites)
+    **State filter:** Optional (use the region selector in the sidebar)
     """)
 
-    st.sidebar.markdown("### 📍 SOCKG State (Optional)")
-    state_options = _build_sockg_state_options(context.states_df)
-    state_choice = st.sidebar.selectbox(
-        "Select State (Optional)",
-        state_options,
-        key=f"{context.analysis_key}_sockg_state",
-        help="Limit results to a state with SOCKG sites",
-    )
+    # Use just the state code for SOCKG (only state filtering needed)
+    state_code = context.selected_state_code
+    state_name = context.selected_state_name
+    state_display = state_name if state_name else "All states"
 
-    selected_state_code = None
-    selected_state_name = None
-    if state_choice != "-- All States --":
-        selected_state_name = state_choice
-        state_row = context.states_df[context.states_df["state_name"] == state_choice]
-        if not state_row.empty:
-            selected_state_code = str(state_row.iloc[0]["fipsCode"]).zfill(2)
+    # Show current filter status in sidebar
+    st.sidebar.markdown("### 🧪 Query Parameters")
+    st.sidebar.caption(f"State filter: {state_display}")
 
     execute = st.sidebar.button(
         "🔍 Execute Query",
@@ -64,29 +44,29 @@ def main(context: AnalysisContext) -> None:
     if execute:
         region_boundary_df = None
         with st.spinner("Running SOCKG queries..."):
-            sites_df = get_sockg_locations(selected_state_code)
-            facilities_df = get_sockg_facilities(selected_state_code)
-            if selected_state_code:
+            sites_df = get_sockg_locations(state_code)
+            facilities_df = get_sockg_facilities(state_code)
+            if state_code:
                 from utils.sparql_helpers import get_region_boundary
-                region_boundary_df = get_region_boundary(selected_state_code)
+                region_boundary_df = get_region_boundary(state_code)
 
         st.session_state[f"{context.analysis_key}_results"] = {
             "sites_df": sites_df,
             "facilities_df": facilities_df,
-            "selected_state_name": selected_state_name,
-            "selected_state_code": selected_state_code,
+            "state_display": state_display,
+            "state_code": state_code,
             "region_boundary_df": region_boundary_df,
         }
         st.session_state[f"{context.analysis_key}_has_results"] = True
 
     if not st.session_state.get(f"{context.analysis_key}_has_results", False):
-        st.info("👈 Select a state (optional) and click 'Execute Query' to run the analysis")
+        st.info("👈 Click 'Execute Query' to run the analysis. State filter is optional.")
         return
 
     results = st.session_state[f"{context.analysis_key}_results"]
     sites_df = results.get("sites_df", pd.DataFrame())
     facilities_df = results.get("facilities_df", pd.DataFrame())
-    state_label = results.get("selected_state_name") or "All SOCKG states"
+    state_label = results.get("state_display") or "All states"
     region_boundary_df = results.get("region_boundary_df")
 
     st.markdown("---")
@@ -215,7 +195,7 @@ def main(context: AnalysisContext) -> None:
                 },
             ).add_to(map_obj)
 
-        folium.LayerControl(collapsed=False).add_to(map_obj)
+        folium.LayerControl(collapsed=True).add_to(map_obj)
         st_folium(map_obj, width=None, height=600, returned_objects=[])
 
     with tab2:

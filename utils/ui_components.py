@@ -2,6 +2,8 @@
 Reusable UI Components
 Includes hierarchical dropdowns and other shared UI elements
 """
+from __future__ import annotations
+
 import streamlit as st
 from typing import Dict, List, Optional
 
@@ -15,54 +17,37 @@ except ImportError:
 
 def build_naics_hierarchy(naics_dict: Dict[str, str]) -> Dict[str, Dict]:
     """
-    Build a hierarchical structure from flat NAICS dictionary that ensures:
-    - 3-digit codes are the top level
-    - 4-digit codes nest under their 3-digit parent
-    - 5- and 6-digit codes nest under their 4-digit parent
+    Build a hierarchical structure from flat NAICS dictionary.
+    Nests codes under their longest existing ancestor in the dictionary.
+    This avoids generating placeholder "NAICS XXX" nodes for missing intermediate levels.
     """
     hierarchy: Dict[str, Dict] = {}
+    nodes: Dict[str, Dict] = {}
 
-    # Prepare unique sets of prefixes
-    three_digit_prefixes = sorted({code[:3] for code in naics_dict})
-    four_digit_prefixes = sorted({code[:4] for code in naics_dict if len(code) >= 4})
+    # 1. Create a node for every code in the dictionary
+    for code, name in sorted(naics_dict.items()):
+        nodes[code] = {
+            "name": name, 
+            "children": {},
+            "code": code
+        }
 
-    # Helper to get a friendly label, falling back to the code
-    def _label_for(code: str) -> str:
-        return naics_dict.get(code, f"NAICS {code}")
-
-    # Create or update 3-digit parents
-    for prefix in three_digit_prefixes:
-        hierarchy[prefix] = {"name": _label_for(prefix), "children": {}}
-
-    # Track 4-digit nodes for easy lookup
-    four_digit_nodes: Dict[str, Dict] = {}
-    for code in four_digit_prefixes:
-        parent_prefix = code[:3]
-        parent_node = hierarchy.setdefault(
-            parent_prefix,
-            {"name": _label_for(parent_prefix), "children": {}}
-        )
-        node = {"name": _label_for(code), "children": {}}
-        parent_node["children"][code] = node
-        four_digit_nodes[code] = node
-
-    # Place 5- and 6-digit codes under their 4-digit parent
-    for code in sorted(naics_dict):
-        if len(code) < 5:
-            continue
-        parent_code = code[:4]
-        parent_node = four_digit_nodes.get(parent_code)
-        if parent_node is None:
-            parent_prefix = parent_code[:3]
-            parent_node = hierarchy.setdefault(
-                parent_prefix,
-                {"name": _label_for(parent_prefix), "children": {}}
-            )["children"].setdefault(
-                parent_code,
-                {"name": _label_for(parent_code), "children": {}}
-            )
-            four_digit_nodes[parent_code] = parent_node
-        parent_node["children"][code] = {"name": _label_for(code), "children": {}}
+    # 2. Organize into hierarchy
+    for code, node in sorted(nodes.items()):
+        # Find longest existing ancestor
+        parent_code = None
+        for i in range(len(code) - 1, 1, -1):
+            prefix = code[:i]
+            if prefix in nodes:
+                parent_code = prefix
+                break
+        
+        if parent_code:
+            # Add to parent's children
+            nodes[parent_code]["children"][code] = node
+        else:
+            # No ancestor found, add to root
+            hierarchy[code] = node
 
     return hierarchy
 
@@ -70,15 +55,18 @@ def build_naics_hierarchy(naics_dict: Dict[str, str]) -> Dict[str, Dict]:
 def convert_to_ant_tree_format(hierarchy: Dict[str, Dict]) -> List[Dict]:
     """
     Convert hierarchy to st_ant_tree format.
-
-    Format: [{"value": "code", "title": "code - name", "children": [...]}]
+    
+    Format: [{"value": "code", "title": "Name (Code)", "children": [...]}]
     """
     tree_data = []
 
     def process_node(code: str, data: Dict) -> Dict:
+        # Title format: "Industry Name (Code)"
+        title = f"{data['name']} ({code})"
+        
         node = {
             "value": code,
-            "title": f"{code} - {data['name']}"
+            "title": title
         }
         children = data.get("children", {})
         if children:

@@ -1,6 +1,8 @@
 """
 Regional Contamination Overview Analysis (Query 3)
 """
+from __future__ import annotations
+
 import streamlit as st
 from analysis_registry import AnalysisContext
 

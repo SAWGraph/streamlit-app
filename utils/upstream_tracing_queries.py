@@ -143,7 +143,14 @@ def convertS2ListToQueryString(s2_list):
 # STEP 1: FIND CONTAMINATED SAMPLES
 # ============================================================================
 
-def execute_sparql_query(substance_uri, material_uri, min_conc, max_conc, region_code):
+def execute_sparql_query(
+    substance_uri,
+    material_uri,
+    min_conc,
+    max_conc,
+    region_code,
+    include_nondetects: bool = False,
+):
     """
     STEP 1: Find contaminated water samples matching all user-specified criteria
     
@@ -225,12 +232,31 @@ def execute_sparql_query(substance_uri, material_uri, min_conc, max_conc, region
     ?regionURI rdf:type kwg-ont:AdministrativeRegion_3 ;
                kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{region_code} ."""
 
+    # Non-detect handling:
+    # Desired behavior:
+    # - include_nondetects=False: only keep detected numeric results within [min,max]
+    # - include_nondetects=True: keep (detected numeric within [min,max]) OR (non-detect flagged)
+    concentration_filter = (
+        f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_conc} && ?numericValue <= {max_conc}) )"
+        if include_nondetects
+        else "\n".join(
+            [
+                "FILTER(!?isNonDetect)",
+                "FILTER(BOUND(?numericValue))",
+                "FILTER(?numericValue > 0)",
+                f"FILTER (?numericValue >= {min_conc})",
+                f"FILTER (?numericValue <= {max_conc})",
+            ]
+        )
+    )
+
     # Build the SPARQL query with f-string substitution
     query = f"""
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
 PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
@@ -251,6 +277,21 @@ WHERE {{
     # Get measurement result and unit
     ?result coso:measurementValue ?result_value;
             coso:measurementUnit ?unit.
+
+    OPTIONAL {{ ?result qudt:quantityValue/qudt:numericValue ?numericResult }}
+    OPTIONAL {{ ?result qudt:enumeratedValue ?enumDetected }}
+    BIND(
+      (BOUND(?enumDetected) || LCASE(STR(?result_value)) = "non-detect" || STR(?result_value) = STR(coso:non-detect))
+      as ?isNonDetect
+    )
+    # IMPORTANT: if this is a non-detect row, force numericValue=0 even if numericResult exists
+    BIND(
+      IF(
+        ?isNonDetect,
+        0,
+        COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
+      ) as ?numericValue
+    )
     
     # CRITICAL FILTER: Ensure concentration is in ng/L (nanograms per liter)
     # Without this, results may include mg/L, μg/L, etc. which would break filtering
@@ -259,8 +300,7 @@ WHERE {{
     # Apply user-specified filters:
     {substance_filter}
     {material_filter}
-    FILTER (?result_value >= {min_conc})
-    FILTER (?result_value <= {max_conc})
+    {concentration_filter}
     
     # Get WKT coordinates for mapping (optional - may not exist for all samples)
     OPTIONAL {{ ?sp geo:hasGeometry/geo:asWKT ?spWKT . }}
@@ -732,11 +772,28 @@ def execute_combined_query(substance_uri, material_uri, min_conc, max_conc, regi
         # Without +, state-level queries would fail to find any results
         region_pattern = f"?region kwg-ont:administrativePartOf+ <http://stko-kwg.geog.ucsb.edu/lod/resource/administrativeRegion.USA.{sanitized_region}> ."
 
+    # Concentration filter: include detected-in-range OR nondetects when enabled
+    concentration_filter = (
+        f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_conc} && ?numericValue <= {max_conc}) )"
+        if include_nondetects
+        else "\n".join(
+            [
+                "FILTER(!?isNonDetect)",
+                "FILTER(BOUND(?numericValue))",
+                "FILTER(?numericValue > 0)",
+                f"FILTER (?numericValue >= {min_conc})",
+                f"FILTER (?numericValue <= {max_conc})",
+            ]
+        )
+    )
+
     query = f"""
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
 PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
 PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
@@ -752,6 +809,19 @@ WHERE {{
     ?sample coso:sampleOfMaterialType ?matType .
     ?result coso:measurementValue ?result_value ;
             coso:measurementUnit ?unit .
+    OPTIONAL {{ ?result qudt:quantityValue/qudt:numericValue ?numericResult }}
+    OPTIONAL {{ ?result qudt:enumeratedValue ?enumDetected }}
+    BIND(
+      (BOUND(?enumDetected) || LCASE(STR(?result_value)) = "non-detect" || STR(?result_value) = STR(coso:non-detect))
+      as ?isNonDetect
+    )
+    BIND(
+      IF(
+        ?isNonDetect,
+        0,
+        COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
+      ) as ?numericValue
+    )
 
     # CRITICAL: Filter by unit (ng/L) to ensure consistent concentration comparison
     VALUES ?unit {{<http://qudt.org/vocab/unit/NanoGM-PER-L>}}
@@ -762,8 +832,7 @@ WHERE {{
 
     {substance_filter}
     {material_filter}
-    FILTER (?result_value >= {min_conc})
-    FILTER (?result_value <= {max_conc})
+    {concentration_filter}
 
     OPTIONAL {{ ?sp geo:hasGeometry/geo:asWKT ?spWKT . }}
 }}

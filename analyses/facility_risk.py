@@ -1,6 +1,8 @@
 """
 Facility Risk Assessment Analysis (Query 4)
 """
+from __future__ import annotations
+
 import streamlit as st
 from analysis_registry import AnalysisContext
 

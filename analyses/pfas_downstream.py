@@ -1,29 +1,32 @@
 """
 PFAS Downstream Tracing Analysis (Query 5)
-Trace contamination downstream through hydrological flow paths
+Trace contamination downstream from facilities of specific industry types
 """
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 import folium
-import math
 from streamlit_folium import st_folium
 import geopandas as gpd
 from shapely import wkt
+from branca.element import Figure
 
 from analysis_registry import AnalysisContext
 from utils.downstream_tracing_queries import (
-    execute_downstream_hydrology_query,
+    execute_downstream_facilities_query,
+    execute_downstream_streams_query,
     execute_downstream_samples_query,
-    execute_downstream_step1_query,
 )
-from utils.substance_filters import get_available_substances_with_labels
-from utils.material_filters import get_available_material_types_with_labels
+from utils.nearby_queries import NAICS_INDUSTRIES
+from utils.ui_components import render_hierarchical_naics_selector
+from utils.sparql_helpers import get_region_boundary
 
 
 def main(context: AnalysisContext) -> None:
     """Main function for PFAS Downstream Tracing analysis"""
     # Check for old session state keys and show migration notice
-    old_keys = ['q5_conc_min', 'q5_conc_max', 'q5_has_results', 'q5_results', 'q5_selected_substance', 'q5_selected_material_type']
+    old_keys = ['q5_conc_min', 'q5_conc_max', 'q5_has_results', 'q5_results']
     if any(key in st.session_state for key in old_keys):
         if 'migration_notice_shown' not in st.session_state:
             st.warning("Session state has been reset. Please reconfigure your analysis parameters.")
@@ -31,159 +34,81 @@ def main(context: AnalysisContext) -> None:
     
     st.markdown("""
     **What this analysis does:**
-    - Finds water samples with PFAS contamination in your selected region
-    - Traces *downstream* through hydrological flow paths
-    - Identifies contaminated sample points downstream using the same PFAS/material/range filters
+    - Finds facilities of a specific industry type in your selected region
+    - Traces *downstream* through hydrological flow paths from those facilities
+    - Identifies contaminated sample points downstream
     
-    **3-Step Process:** Find contamination → Trace downstream → Find downstream contamination
+    **Use case:** Determine if PFAS contamination flows downstream from specific industries (e.g., waste treatment, landfills, manufacturing)
     """)
     
     # Initialize session state for analysis-specific params
     analysis_key = context.analysis_key
-    conc_min_key = f"{analysis_key}_conc_min"
-    conc_max_key = f"{analysis_key}_conc_max"
     has_results_key = f"{analysis_key}_has_results"
     results_key = f"{analysis_key}_results"
-    selected_substance_key = f"{analysis_key}_selected_substance"
-    selected_material_type_key = f"{analysis_key}_selected_material_type"
+    conc_min_key = f"{analysis_key}_conc_min"
+    conc_max_key = f"{analysis_key}_conc_max"
     
-    if selected_substance_key not in st.session_state:
-        st.session_state[selected_substance_key] = None
-    if selected_material_type_key not in st.session_state:
-        st.session_state[selected_material_type_key] = None
     if conc_min_key not in st.session_state:
         st.session_state[conc_min_key] = 0
     if conc_max_key not in st.session_state:
         st.session_state[conc_max_key] = 100
     
-    # Query parameters in sidebar form
-    st.sidebar.markdown("### 🧪 Query Parameters")
-    
-    # Get available substances for the selected region (cached)
-    @st.cache_data(ttl=3600)
-    def get_available_substances_view(region_code: str, is_subdivision: bool, _version: int = 6):
-        """Get substances available in the selected region with display names."""
-        return get_available_substances_with_labels(region_code, is_subdivision)
-    
-    # Determine if region is a subdivision
-    is_subdivision = len(context.region_code) > 5 if context.region_code else False
-    
-    substances_view = (
-        get_available_substances_view(context.region_code, is_subdivision, _version=6)
-        if context.region_code
-        else pd.DataFrame()
+    # --- SIDEBAR PARAMETERS ---
+    # Industry selector using hierarchical tree dropdown (outside form for compatibility)
+    st.sidebar.markdown("### 🏭 Industry Type")
+    st.sidebar.markdown("_Required: select an industry to trace downstream_")
+    selected_naics_code = render_hierarchical_naics_selector(
+        naics_dict=NAICS_INDUSTRIES,
+        key=f"{analysis_key}_industry_selector",
+        default_value=None,  # No default - user must select
+        allow_empty=True,  # Allow empty so we can show validation message
     )
-    
+
+    # Get display name for selected code
+    selected_industry_display = (
+        f"{selected_naics_code} - {NAICS_INDUSTRIES.get(selected_naics_code, 'Unknown')}"
+        if selected_naics_code
+        else "Not Selected"
+    )
+
+    # Other parameters in a form
     with st.sidebar.form(key=f"{analysis_key}_params_form"):
-        st.markdown("### 🧪 PFAS Substance")
+        st.markdown("### 📊 Analysis Parameters")
         
-        substance_map = {}
-        if not substances_view.empty:
-            for _, row in substances_view.iterrows():
-                name = row["display_name"]
-                uri = row["substance"]
-                if name not in substance_map or uri.endswith("_A"):
-                    substance_map[name] = uri
-
-        substance_options = ["-- All Substances --"] + sorted(substance_map.keys())
-        
-        selected_substance_display = st.selectbox(
-            "Select PFAS Substance (Optional)",
-            substance_options,
-            key=f"{analysis_key}_substance_select",
-            help="Select a specific PFAS compound to analyze, or leave as 'All Substances'"
-        )
-        
-        selected_substance_uri = None
-        selected_substance_name = None
-        if selected_substance_display != "-- All Substances --":
-            selected_substance_name = selected_substance_display
-            selected_substance_uri = substance_map.get(selected_substance_display)
-            st.session_state[selected_substance_key] = {
-                'name': selected_substance_name,
-                'uri': selected_substance_uri
-            }
-        else:
-            st.session_state[selected_substance_key] = None
+        st.markdown(f"**Selected Industry:** {selected_industry_display}")
         
         st.markdown("---")
         
-        # MATERIAL TYPE SELECTION (Optional)
-        st.markdown("### 🧫 Sample Material Type")
-        
-        # Get available material types for the selected region (cached)
-        @st.cache_data(ttl=3600)
-        def get_available_material_types_view(region_code: str, is_subdivision: bool, _version: int = 4):
-            """Get material types available in the selected region with display names."""
-            return get_available_material_types_with_labels(region_code, is_subdivision)
-        
-        material_types_view = (
-            get_available_material_types_view(context.region_code, is_subdivision, _version=4)
-            if context.region_code
-            else pd.DataFrame()
-        )
-        
-        material_type_options = ["-- All Material Types --"]
-        material_type_display = {}
-
-        if not material_types_view.empty:
-            for _, row in material_types_view.iterrows():
-                display_name = row["display_name"]
-                material_type_options.append(display_name)
-                material_type_display[display_name] = row["matType"]
-        
-        selected_material_display = st.selectbox(
-            "Select Material Type (Optional)",
-            material_type_options,
-            key=f"{analysis_key}_material_select",
-            help="Select the type of sample material analyzed (e.g., Drinking Water, Groundwater, Soil)"
-        )
-        
-        selected_material_uri = None
-        selected_material_short = None
-        selected_material_label = None
-        selected_material_name = None
-        
-        if selected_material_display != "-- All Material Types --":
-            selected_material_name = selected_material_display
-            selected_material_uri = material_type_display.get(selected_material_display)
-            selected_material_short = selected_material_display
-            selected_material_label = selected_material_display
-            st.session_state[selected_material_type_key] = {
-                'short': selected_material_short,
-                'label': selected_material_label,
-                'uri': selected_material_uri,
-                'name': selected_material_name
-            }
-        else:
-            st.session_state[selected_material_type_key] = None
+        # Region display
+        region_display = context.region_display or "Not Selected"
+        st.markdown(f"**Region:** {region_display}")
+        st.caption("_Required: Select state and county above_")
         
         st.markdown("---")
         
-        # DETECTED CONCENTRATION SELECTION
+        # DETECTED CONCENTRATION
         st.markdown("### 📊 Detected Concentration")
 
-        # Include nondetects option
+        # Include nondetects option (matches upstream/nearby behavior)
         include_nondetects_key = f"{analysis_key}_include_nondetects"
         if include_nondetects_key not in st.session_state:
             st.session_state[include_nondetects_key] = False
-
         include_nondetects = st.checkbox(
             "Include nondetects",
             value=st.session_state[include_nondetects_key],
             key=f"{analysis_key}_nondetects_checkbox",
-            help="Include observations with zero concentration or nondetect flags"
+            help="Include observations flagged as non-detect (included alongside detected results in range)",
         )
         st.session_state[include_nondetects_key] = include_nondetects
-
+        
         max_limit = 500
-
+        
         st.session_state[conc_min_key] = min(st.session_state[conc_min_key], max_limit)
         st.session_state[conc_max_key] = min(st.session_state[conc_max_key], max_limit)
         if st.session_state[conc_min_key] > st.session_state[conc_max_key]:
             st.session_state[conc_max_key] = st.session_state[conc_min_key]
-
-        # Display current min/max boxes above the slider
+        
+        # Show current min/max boxes above the slider
         min_col, max_col = st.columns(2)
         min_col.number_input(
             "Min (ng/L)",
@@ -203,9 +128,8 @@ def main(context: AnalysisContext) -> None:
             key=f"{analysis_key}_concentration_max_display",
             help="Maximum value reflected from the slider"
         )
-
+        
         # Range slider for concentration selection
-        # Using slider as primary control to avoid sync issues with form
         slider_value = st.slider(
             "Select concentration range (ng/L)",
             min_value=0,
@@ -215,56 +139,75 @@ def main(context: AnalysisContext) -> None:
             key=f"{analysis_key}_concentration_slider",
             help="Drag to select min and max concentration in nanograms per liter"
         )
-
+        
         # Extract slider values
         min_concentration, max_concentration = slider_value
-
+        
         # Update session state
         st.session_state[conc_min_key] = min_concentration
         st.session_state[conc_max_key] = max_concentration
-
+        
         # Display selected range clearly
         st.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
-
-        # Show concentration context
-        if max_concentration <= 10:
-            st.info("🟢 Low range - background levels")
-        elif max_concentration <= 70:
-            st.info("🟡 Moderate range - measurable contamination")
-        else:
-            st.warning("🔴 High range - significant concern")
         
         st.markdown("---")
-        county_selected = context.selected_county_code is not None
+        
+        # Execute button - state, county, and industry are all required
+        has_state = bool(context.selected_state_code)
+        has_county = bool(context.selected_county_code)
+        has_industry = bool(selected_naics_code)
+        can_execute = has_state and has_county and has_industry
+        
+        # Build help message for missing selections
+        missing = []
+        if not has_state:
+            missing.append("state")
+        if not has_county:
+            missing.append("county")
+        if not has_industry:
+            missing.append("industry")
+        
+        help_text = f"Select {', '.join(missing)} first" if missing else "Execute the downstream tracing analysis"
+        
         execute_button = st.form_submit_button(
             "🔍 Execute Query",
             type="primary",
             use_container_width=True,
-            disabled=not county_selected,
-            help="Select a county first" if not county_selected else "Execute the downstream tracing analysis"
+            disabled=not can_execute,
+            help=help_text
         )
     
+    # Execute the query when form is submitted
     if execute_button:
+        # Validate all required fields
+        missing_fields = []
         if not context.selected_state_code:
-            st.error("❌ **State selection is required!** Please select a state before executing the query.")
+            missing_fields.append("state")
+        if not context.selected_county_code:
+            missing_fields.append("county")
+        if not selected_naics_code:
+            missing_fields.append("industry type")
+        
+        if missing_fields:
+            st.error(f"❌ **Missing required selections!** Please select: {', '.join(missing_fields)}")
         else:
             params_data = []
             params_data.append({
-                "Parameter": "PFAS Substance",
-                "Value": selected_substance_name if selected_substance_name else "All Substances"
+                "Parameter": "Industry Type",
+                "Value": selected_industry_display
             })
             params_data.append({
-                "Parameter": "Material Type",
-                "Value": selected_material_name if selected_material_name else "All Material Types"
+                "Parameter": "Geographic Region",
+                "Value": context.region_display or "All Regions"
             })
-            conc_range_text = f"{min_concentration} - {max_concentration} ng/L"
-            if include_nondetects:
-                conc_range_text += " (including nondetects)"
             params_data.append({
                 "Parameter": "Detected Concentration",
-                "Value": conc_range_text
+                "Value": f"{min_concentration} - {max_concentration} ng/L"
             })
-            params_data.append({"Parameter": "Geographic Region", "Value": context.region_display})
+            params_data.append({
+                "Parameter": "Include nondetects",
+                "Value": "Yes" if include_nondetects else "No",
+            })
             
             params_df = pd.DataFrame(params_data)
             
@@ -273,46 +216,38 @@ def main(context: AnalysisContext) -> None:
             
             prog_col1, prog_col2, prog_col3 = st.columns(3)
             
-            starting_samples_df = pd.DataFrame()
-            downstream_s2_df = pd.DataFrame()
-            downstream_flowlines_df = pd.DataFrame()
-            downstream_samples_df = pd.DataFrame()
-            downstream_samples_outside_start_df = pd.DataFrame()
-            downstream_overlap_count = 0
+            facilities_df = pd.DataFrame()
+            streams_df = pd.DataFrame()
+            samples_df = pd.DataFrame()
             
             step_errors = {}
             debug_info = {}
             
             with prog_col1:
-                with st.spinner("🔄 Step 1: Finding contaminated samples..."):
-                    starting_samples_df, step1_error, step1_debug = execute_downstream_step1_query(
-                        substance_uri=selected_substance_uri,
-                        material_uri=selected_material_uri,
-                        min_conc=min_concentration,
-                        max_conc=max_concentration,
+                with st.spinner("🔄 Step 1: Finding facilities..."):
+                    facilities_df, step1_error, step1_debug = execute_downstream_facilities_query(
+                        naics_code=selected_naics_code,
                         region_code=context.region_code,
-                        include_nondetects=include_nondetects
                     )
                     debug_info["step1"] = step1_debug
                     if step1_error:
                         step_errors["step1"] = step1_error
                 
-                # Import get_region_boundary from app - will be refactored later
-                from app import get_region_boundary
                 region_boundary_df = get_region_boundary(context.region_code)
                 
                 if step1_error:
                     st.error(f"❌ Step 1 failed: {step1_error}")
-                elif not starting_samples_df.empty:
-                    st.success(f"✅ Step 1: Found {len(starting_samples_df)} contaminated samples")
+                elif not facilities_df.empty:
+                    st.success(f"✅ Step 1: Found {len(facilities_df)} facilities")
                 else:
-                    st.warning("⚠️ Step 1: No contaminated samples found")
+                    st.warning("⚠️ Step 1: No facilities found")
             
             with prog_col2:
-                if not starting_samples_df.empty:
-                    with st.spinner("🔄 Step 2: Tracing downstream flow paths..."):
-                        downstream_s2_df, downstream_flowlines_df, step2_error, step2_debug = execute_downstream_hydrology_query(
-                            starting_samples_df
+                if not facilities_df.empty:
+                    with st.spinner("🔄 Step 2: Tracing downstream streams..."):
+                        streams_df, step2_error, step2_debug = execute_downstream_streams_query(
+                            naics_code=selected_naics_code,
+                            region_code=context.region_code,
                         )
                         debug_info["step2"] = step2_debug
                         if step2_error:
@@ -320,67 +255,47 @@ def main(context: AnalysisContext) -> None:
                     
                     if step2_error:
                         st.error(f"❌ Step 2 failed: {step2_error}")
-                    elif not downstream_s2_df.empty:
-                        st.success("✅ Step 2: Traced downstream flow paths")
+                    elif not streams_df.empty:
+                        stream_names = streams_df['streamName'].dropna().unique() if 'streamName' in streams_df.columns else []
+                        st.success(f"✅ Step 2: Found {len(streams_df)} flowlines ({len(stream_names)} named streams)")
                     else:
                         st.info("ℹ️ Step 2: No downstream flow paths found")
                 else:
-                    st.info("⏭️ Step 2: Skipped (no samples)")
+                    st.info("⏭️ Step 2: Skipped (no facilities)")
             
             with prog_col3:
-                if not downstream_s2_df.empty:
-                    with st.spinner("🔄 Step 3: Finding downstream contaminated samples..."):
-                        downstream_samples_df, step3_error, step3_debug = execute_downstream_samples_query(
-                            downstream_s2_df=downstream_s2_df,
-                            substance_uri=selected_substance_uri,
-                            material_uri=selected_material_uri,
+                if not facilities_df.empty:
+                    with st.spinner("🔄 Step 3: Finding downstream samples..."):
+                        samples_df, step3_error, step3_debug = execute_downstream_samples_query(
+                            naics_code=selected_naics_code,
+                            region_code=context.region_code,
                             min_conc=min_concentration,
                             max_conc=max_concentration,
-                            include_nondetects=include_nondetects
+                            include_nondetects=include_nondetects,
                         )
                         debug_info["step3"] = step3_debug
                         if step3_error:
                             step_errors["step3"] = step3_error
-
-                    downstream_samples_outside_start_df = downstream_samples_df
-                    downstream_overlap_count = 0
-                    if (
-                        downstream_samples_df is not None
-                        and not downstream_samples_df.empty
-                        and 'sp' in downstream_samples_df.columns
-                        and 'sp' in starting_samples_df.columns
-                    ):
-                        overlap_mask = downstream_samples_df['sp'].isin(starting_samples_df['sp'].dropna().unique())
-                        downstream_overlap_count = int(overlap_mask.sum())
-                        downstream_samples_outside_start_df = downstream_samples_df[~overlap_mask].reset_index(drop=True)
                     
                     if step3_error:
                         st.error(f"❌ Step 3 failed: {step3_error}")
-                    elif not downstream_samples_df.empty:
-                        outside_count = len(downstream_samples_outside_start_df) if downstream_samples_outside_start_df is not None else 0
-                        st.success(
-                            f"✅ Step 3: Found {len(downstream_samples_df)} downstream contaminated samples "
-                            f"({outside_count} outside starting region)"
-                        )
+                    elif not samples_df.empty:
+                        st.success(f"✅ Step 3: Found {len(samples_df)} downstream samples")
                     else:
-                        st.info("ℹ️ Step 3: No downstream contaminated samples found")
+                        st.info("ℹ️ Step 3: No downstream samples found")
                 else:
-                    st.info("⏭️ Step 3: Skipped (no downstream flow paths)")
-            
-            starting_samples_df = starting_samples_df.drop(columns=["s2cell"], errors="ignore")
+                    st.info("⏭️ Step 3: Skipped (no facilities)")
             
             st.session_state[results_key] = {
-                'starting_samples_df': starting_samples_df,
-                'downstream_flowlines_df': downstream_flowlines_df,
-                'downstream_samples_df': downstream_samples_df,
-                'downstream_samples_outside_start_df': downstream_samples_outside_start_df,
-                'downstream_overlap_count': downstream_overlap_count,
+                'facilities_df': facilities_df,
+                'streams_df': streams_df,
+                'samples_df': samples_df,
                 'step_errors': step_errors,
                 'debug_info': debug_info,
                 'region_boundary_df': region_boundary_df,
                 'params_df': params_df,
                 'query_region_code': context.region_code,
-                'selected_material_name': selected_material_name
+                'selected_industry': selected_industry_display,
             }
             st.session_state[has_results_key] = True
     
@@ -388,16 +303,14 @@ def main(context: AnalysisContext) -> None:
     if st.session_state.get(has_results_key, False):
         results = st.session_state[results_key]
         
-        starting_samples_df = results.get('starting_samples_df')
-        downstream_flowlines_df = results.get('downstream_flowlines_df')
-        downstream_samples_df = results.get('downstream_samples_df')
-        downstream_samples_outside_start_df = results.get('downstream_samples_outside_start_df')
-        downstream_overlap_count = results.get('downstream_overlap_count')
+        facilities_df = results.get('facilities_df')
+        streams_df = results.get('streams_df')
+        samples_df = results.get('samples_df')
         debug_info = results.get('debug_info')
         region_boundary_df = results.get('region_boundary_df')
         params_df = results.get('params_df')
         query_region_code = results.get('query_region_code')
-        saved_material_name = results.get('selected_material_name')
+        selected_industry = results.get('selected_industry')
         
         st.markdown("---")
         st.markdown("### 📋 Selected Parameters (from executed query)")
@@ -405,8 +318,6 @@ def main(context: AnalysisContext) -> None:
         
         if debug_info:
             with st.expander("🐞 Debug Info (queries & response details)"):
-                step2_debug = debug_info.get("step2") or {}
-                step2_flowlines_debug = step2_debug.get("downstream_flowlines") or {}
                 st.json(
                     {
                         "step_errors": results.get("step_errors"),
@@ -415,7 +326,11 @@ def main(context: AnalysisContext) -> None:
                             for k, v in (debug_info.get("step1") or {}).items()
                             if k not in {"query", "response_text_snippet"}
                         },
-                        "step2": {k: v for k, v in step2_flowlines_debug.items() if k not in {"query", "response_text_snippet"}},
+                        "step2": {
+                            k: v
+                            for k, v in (debug_info.get("step2") or {}).items()
+                            if k not in {"query", "response_text_snippet"}
+                        },
                         "step3": {
                             k: v
                             for k, v in (debug_info.get("step3") or {}).items()
@@ -427,210 +342,332 @@ def main(context: AnalysisContext) -> None:
         st.markdown("---")
         st.markdown("### 🔬 Query Results")
         
-        # Step 1 Results
-        if starting_samples_df is not None and not starting_samples_df.empty:
-            st.markdown("### 🔬 Step 1: Contaminated Samples (Start)")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Samples", len(starting_samples_df))
-            with col2:
-                if 'sp' in starting_samples_df.columns:
-                    st.metric("Unique Sample Points", starting_samples_df['sp'].nunique())
-            with col3:
-                st.metric("Material Type", saved_material_name or "All")
-            with col4:
-                if 'max' in starting_samples_df.columns:
-                    avg_max = pd.to_numeric(starting_samples_df['max'], errors='coerce').mean()
-                    if pd.notna(avg_max):
-                        st.metric("Avg Max Concentration", f"{avg_max:.2f} ng/L")
-            
-            with st.expander("📊 View Starting Samples Data"):
-                st.dataframe(starting_samples_df, use_container_width=True)
-                st.download_button(
-                    label="📥 Download Starting Samples CSV",
-                    data=starting_samples_df.to_csv(index=False),
-                    file_name=f"downstream_starting_samples_{query_region_code}.csv",
-                    mime="text/csv",
-                    key=f"download_{analysis_key}_starting_samples"
-                )
+        # Summary metrics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("🏭 Facilities", len(facilities_df) if facilities_df is not None else 0)
+        with col2:
+            st.metric("🌊 Flowlines", len(streams_df) if streams_df is not None else 0)
+        with col3:
+            st.metric("🧪 Downstream Samples", len(samples_df) if samples_df is not None else 0)
         
-        # Step 2 Results
-        if downstream_flowlines_df is not None and not downstream_flowlines_df.empty:
-            st.markdown("### 🌊 Step 2: Downstream Flow Paths")
-            st.metric("Flowlines (mapped)", len(downstream_flowlines_df))
+        # Map section
+        has_facility_wkt = facilities_df is not None and not facilities_df.empty and 'facWKT' in facilities_df.columns
+        has_stream_wkt = streams_df is not None and not streams_df.empty and 'dsflWKT' in streams_df.columns
+        has_sample_wkt = samples_df is not None and not samples_df.empty and 'spWKT' in samples_df.columns
         
-        # Step 3 Results
-        if downstream_samples_df is not None and not downstream_samples_df.empty:
-            st.markdown("### ⬇️ Step 3: Contaminated Samples (Downstream)")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Samples", len(downstream_samples_df))
-            with col2:
-                if 'sp' in downstream_samples_df.columns:
-                    st.metric("Unique Sample Points", downstream_samples_df['sp'].nunique())
-            with col3:
-                if 'max' in downstream_samples_df.columns:
-                    avg_max = pd.to_numeric(downstream_samples_df['max'], errors='coerce').mean()
-                    if pd.notna(avg_max):
-                        st.metric("Avg Max Concentration", f"{avg_max:.2f} ng/L")
-            with col4:
-                if downstream_samples_outside_start_df is not None:
-                    st.metric("Outside Starting Region", len(downstream_samples_outside_start_df))
-            
-            with st.expander("📊 View Downstream Samples Data"):
-                st.dataframe(downstream_samples_df, use_container_width=True)
-                st.download_button(
-                    label="📥 Download Downstream Samples CSV",
-                    data=downstream_samples_df.to_csv(index=False),
-                    file_name=f"downstream_contaminated_samples_{query_region_code}.csv",
-                    mime="text/csv",
-                    key=f"download_{analysis_key}_downstream_samples"
-                )
-
-                if downstream_samples_outside_start_df is not None and downstream_samples_outside_start_df.empty:
-                    st.caption(
-                        "All downstream contaminated samples found are also present in the starting sample set "
-                        f"(overlap: {downstream_overlap_count or 0})."
-                    )
-        
-        # Map
-        has_starting_wkt = starting_samples_df is not None and not starting_samples_df.empty and 'spWKT' in starting_samples_df.columns
-        has_downstream_wkt = downstream_samples_df is not None and not downstream_samples_df.empty and 'spWKT' in downstream_samples_df.columns
-        has_flow_wkt = downstream_flowlines_df is not None and not downstream_flowlines_df.empty and 'downstream_flowlineWKT' in downstream_flowlines_df.columns
-        
-        if has_starting_wkt or has_downstream_wkt or has_flow_wkt:
+        if has_facility_wkt or has_stream_wkt or has_sample_wkt:
             st.markdown("---")
             st.markdown("### 🗺️ Interactive Map")
             
-            starting_gdf = None
-            downstream_gdf = None
-            flowlines_gdf = None
+            facilities_gdf = None
+            streams_gdf = None
+            samples_gdf = None
             
-            if has_starting_wkt:
-                starting_with_wkt = starting_samples_df[starting_samples_df['spWKT'].notna()].copy()
-                if not starting_with_wkt.empty:
+            # Process facilities
+            if has_facility_wkt:
+                facilities_with_wkt = facilities_df[facilities_df['facWKT'].notna()].copy()
+                if not facilities_with_wkt.empty:
                     try:
-                        starting_with_wkt['geometry'] = starting_with_wkt['spWKT'].apply(wkt.loads)
-                        starting_gdf = gpd.GeoDataFrame(starting_with_wkt, geometry='geometry')
-                        starting_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+                        facilities_with_wkt['geometry'] = facilities_with_wkt['facWKT'].apply(wkt.loads)
+                        facilities_gdf = gpd.GeoDataFrame(facilities_with_wkt, geometry='geometry')
+                        facilities_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+                        # Format facility links for popup
+                        if 'facility' in facilities_gdf.columns:
+                            facilities_gdf['facility_link'] = facilities_gdf['facility'].apply(
+                                lambda x: f'<a href="https://frs-public.epa.gov/ords/frs_public2/fii_query_detail.disp_program_facility?p_registry_id={x.split(".")[-1]}" target="_blank">{x}</a>'
+                                if x else x
+                            )
                     except Exception as e:
-                        st.warning(f"Could not parse starting sample geometries: {e}")
+                        st.warning(f"Could not parse facility geometries: {e}")
             
-            if has_downstream_wkt:
-                downstream_with_wkt = downstream_samples_df[downstream_samples_df['spWKT'].notna()].copy()
-                if not downstream_with_wkt.empty:
+            # Process streams
+            if has_stream_wkt:
+                streams_with_wkt = streams_df[streams_df['dsflWKT'].notna()].copy()
+                if not streams_with_wkt.empty:
                     try:
-                        downstream_with_wkt['geometry'] = downstream_with_wkt['spWKT'].apply(wkt.loads)
-                        downstream_gdf = gpd.GeoDataFrame(downstream_with_wkt, geometry='geometry')
-                        downstream_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+                        streams_with_wkt['geometry'] = streams_with_wkt['dsflWKT'].apply(wkt.loads)
+                        streams_gdf = gpd.GeoDataFrame(streams_with_wkt, geometry='geometry')
+                        streams_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
                     except Exception as e:
-                        st.warning(f"Could not parse downstream sample geometries: {e}")
+                        st.warning(f"Could not parse stream geometries: {e}")
             
-            if has_flow_wkt:
-                flowlines_with_wkt = downstream_flowlines_df[downstream_flowlines_df['downstream_flowlineWKT'].notna()].copy()
-                if not flowlines_with_wkt.empty:
+            # Process samples
+            if has_sample_wkt:
+                samples_with_wkt = samples_df[samples_df['spWKT'].notna()].copy()
+                if not samples_with_wkt.empty:
                     try:
-                        flowlines_with_wkt['geometry'] = flowlines_with_wkt['downstream_flowlineWKT'].apply(wkt.loads)
-                        flowlines_gdf = gpd.GeoDataFrame(flowlines_with_wkt, geometry='geometry')
-                        flowlines_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+                        samples_with_wkt['geometry'] = samples_with_wkt['spWKT'].apply(wkt.loads)
+                        samples_gdf = gpd.GeoDataFrame(samples_with_wkt, geometry='geometry')
+                        samples_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+                        # Format sample point links for popup
+                        if 'samplePoint' in samples_gdf.columns:
+                            samples_gdf['samplePoint_link'] = samples_gdf['samplePoint'].apply(
+                                lambda x: f'<a href="{x}" target="_blank">{x}</a>' if x else x
+                            )
+                        # Clean up unit encoding
+                        if 'unit' in samples_gdf.columns:
+                            samples_gdf['unit'] = samples_gdf['unit'].str.replace('Î¼', 'μ')
+                        if 'results' in samples_gdf.columns:
+                            samples_gdf['results'] = samples_gdf['results'].str.replace('Î¼', 'μ')
                     except Exception as e:
-                        st.warning(f"Could not parse flowline geometries: {e}")
+                        st.warning(f"Could not parse sample geometries: {e}")
             
-            if starting_gdf is not None and not starting_gdf.empty:
-                center_lat = starting_gdf.geometry.y.mean()
-                center_lon = starting_gdf.geometry.x.mean()
+            # Determine map center
+            if samples_gdf is not None and not samples_gdf.empty:
+                center_lat = samples_gdf.geometry.y.mean()
+                center_lon = samples_gdf.geometry.x.mean()
                 map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
-            elif downstream_gdf is not None and not downstream_gdf.empty:
-                center_lat = downstream_gdf.geometry.y.mean()
-                center_lon = downstream_gdf.geometry.x.mean()
+            elif facilities_gdf is not None and not facilities_gdf.empty:
+                center_lat = facilities_gdf.geometry.centroid.y.mean()
+                center_lon = facilities_gdf.geometry.centroid.x.mean()
                 map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
             else:
                 map_obj = folium.Map(location=[39.8, -98.5], zoom_start=4)
             
-            # Add administrative boundary if available
-            if region_boundary_df is not None and not region_boundary_df.empty:
+            # Add region boundary first (background layer)
+            if region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
                 try:
-                    boundary_wkt = region_boundary_df.iloc[0]['countyWKT']
+                    boundary_wkt_val = region_boundary_df.iloc[0]['countyWKT']
                     boundary_name = region_boundary_df.iloc[0].get('countyName', 'Region')
+                    boundary_gdf = gpd.GeoDataFrame(
+                        index=[0], crs="EPSG:4326", 
+                        geometry=[wkt.loads(boundary_wkt_val)]
+                    )
                     
-                    from shapely import wkt as shapely_wkt
-                    boundary_geom = shapely_wkt.loads(boundary_wkt)
-                    boundary_gdf = gpd.GeoDataFrame([{
-                        'name': boundary_name,
-                        'geometry': boundary_geom
-                    }], crs='EPSG:4326')
-                    
+                    # Determine boundary color based on region type
                     region_code_len = len(str(query_region_code))
                     if region_code_len > 5:
-                        boundary_color = '#666666'
+                        boundary_color = '#FF0000'  # Red for subdivision
+                        region_type = "Subdivision"
                     elif region_code_len == 5:
-                        boundary_color = '#666666'
+                        boundary_color = '#666666'  # Gray for county
+                        region_type = "County"
                     else:
-                        boundary_color = '#444444'
+                        boundary_color = '#000000'  # Black for state
+                        region_type = "State"
                     
-                    boundary_gdf.explore(
-                        m=map_obj,
-                        name=f'<span style="color:{boundary_color};">📍 {boundary_name} Boundary</span>',
-                        color=boundary_color,
-                        style_kwds=dict(
-                            fillColor='none',
-                            weight=3,
-                            opacity=0.8,
-                            dashArray='5, 5'
-                        ),
-                        overlay=True,
-                        show=True
-                    )
+                    folium.GeoJson(
+                        boundary_gdf.to_json(),
+                        name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
+                        style_function=lambda x, color=boundary_color: {
+                            'fillColor': '#ffffff00',
+                            'color': color,
+                            'weight': 3,
+                            'fillOpacity': 0.0
+                        }
+                    ).add_to(map_obj)
                 except Exception as e:
-                    print(f"Error displaying boundary: {e}")
-                    pass
+                    st.warning(f"Could not display region boundary: {e}")
             
-            if flowlines_gdf is not None and not flowlines_gdf.empty:
-                flowlines_gdf.explore(
+            # Add samples layer (so it's on top)
+            if samples_gdf is not None and not samples_gdf.empty:
+                # Scale point size based on Max concentration
+                def get_radius(row):
+                    max_val = row.get('Max')
+                    if max_val in [None, 'non-detect', 'http://w3id.org/coso/v1/contaminoso#non-detect']:
+                        return 5
+                    try:
+                        max_float = float(max_val)
+                        if max_float < 40:
+                            return 5
+                        elif max_float < 160:
+                            return max_float / 8
+                        else:
+                            return 25
+                    except:
+                        return 5
+                
+                samples_gdf.explore(
                     m=map_obj,
-                    name='<span style="color:DodgerBlue;">🌊 Downstream Flowlines</span>',
-                    color='DodgerBlue',
-                    style_kwds=dict(weight=2, opacity=0.5),
-                    tooltip=False,
-                    popup=False
-                )
-            
-            if starting_gdf is not None and not starting_gdf.empty:
-                starting_gdf.explore(
-                    m=map_obj,
-                    name='<span style="color:DarkOrange;">🔬 Starting Samples</span>',
+                    name=f'<span style="color:DarkOrange;">🧪 Downstream Samples ({len(samples_gdf)})</span>',
                     color='DarkOrange',
-                    marker_kwds=dict(radius=8),
-                    marker_type='circle_marker',
-                    popup=['sp', 'max', 'resultCount'] if all(col in starting_gdf.columns for col in ['sp', 'max', 'resultCount']) else True,
-                    tooltip=['max'] if 'max' in starting_gdf.columns else None,
-                    style_kwds=dict(fillOpacity=0.7, opacity=0.8)
-                )
-            
-            if downstream_gdf is not None and not downstream_gdf.empty:
-                downstream_gdf.explore(
-                    m=map_obj,
-                    name='<span style="color:Purple;">⬇️ Downstream Samples</span>',
-                    color='Purple',
                     marker_kwds=dict(radius=6),
                     marker_type='circle_marker',
-                    popup=['sp', 'max', 'resultCount'] if all(col in downstream_gdf.columns for col in ['sp', 'max', 'resultCount']) else True,
-                    tooltip=['max'] if 'max' in downstream_gdf.columns else None,
+                    popup=['samplePoint', 'Max', 'resultCount', 'results'] if all(c in samples_gdf.columns for c in ['samplePoint', 'Max', 'resultCount']) else True,
+                    popup_kwds={'max_height': 500},
                     style_kwds=dict(fillOpacity=0.7, opacity=0.8)
                 )
             
-            folium.LayerControl(collapsed=False).add_to(map_obj)
+            # Add streams layer
+            if streams_gdf is not None and not streams_gdf.empty:
+                streams_gdf.explore(
+                    m=map_obj,
+                    name=f'<span style="color:LightSkyBlue;">🌊 Downstream Streams</span>',
+                    color='LightSkyBlue',
+                    style_kwds=dict(weight=2, opacity=0.5),
+                    popup=['streamName', 'fl_type'] if all(c in streams_gdf.columns for c in ['streamName', 'fl_type']) else False,
+                    popup_kwds={'max_width': 350}
+                )
             
-            st_folium(map_obj, width=None, height=600, returned_objects=[])
+            # Add facilities layer with different colors by industry type
+            if facilities_gdf is not None and not facilities_gdf.empty:
+                # Important UX: do NOT create one LayerControl entry per industry
+                # (it produces an unhideable full-height list overlaying the map).
+                # Instead, add all facilities into a single FeatureGroup layer.
+                facilities_layer = folium.FeatureGroup(
+                    name=f'<span style="color:Purple;">🏭 Facilities ({len(facilities_gdf)})</span>',
+                    show=True,
+                )
+                facilities_layer.add_to(map_obj)
+
+                colors = [
+                    'Purple', 'PaleVioletRed', 'Orchid', 'Fuchsia', 'MediumVioletRed',
+                    'HotPink', 'LightPink', 'red', 'MidnightBlue', 'MediumBlue',
+                    'SlateBlue', 'DodgerBlue', 'DeepSkyBlue', 'SkyBlue', 'CadetBlue'
+                ]
+
+                has_industry = 'industryName' in facilities_gdf.columns
+                industry_to_color = {}
+                if has_industry:
+                    for i, industry in enumerate(sorted(facilities_gdf['industryName'].dropna().unique())):
+                        industry_to_color[industry] = colors[i % len(colors)]
+
+                for row in facilities_gdf.itertuples(index=False):
+                    try:
+                        geom = getattr(row, "geometry", None)
+                        if geom is None:
+                            continue
+                        lat, lon = float(geom.y), float(geom.x)
+                    except Exception:
+                        continue
+
+                    industry_name = getattr(row, "industryName", None) if has_industry else None
+                    marker_color = industry_to_color.get(industry_name, "Purple")
+
+                    facility_name = getattr(row, "facilityName", None)
+                    facility_link = getattr(row, "facility_link", None)
+
+                    popup_bits = []
+                    if facility_name:
+                        popup_bits.append(f"<b>{facility_name}</b>")
+                    if industry_name:
+                        popup_bits.append(f"{industry_name}")
+                    if facility_link:
+                        popup_bits.append(f"{facility_link}")
+                    popup_html = "<br>".join(popup_bits) if popup_bits else "Facility"
+
+                    folium.CircleMarker(
+                        location=(lat, lon),
+                        radius=5,
+                        color="DimGray",
+                        weight=1,
+                        fill=True,
+                        fill_color=marker_color,
+                        fill_opacity=0.85,
+                        popup=folium.Popup(popup_html, max_width=350),
+                    ).add_to(facilities_layer)
+            
+            # Add layer control
+            folium.LayerControl(collapsed=True).add_to(map_obj)
+            
+            # Wrap in Figure for consistent sizing
+            fig = Figure(width='100%', height=900)
+            fig.add_child(map_obj)
+            
+            st_folium(map_obj, width=None, height=700, returned_objects=[])
             
             st.info("""
             **🗺️ Map Legend:**
-            - 🟠 **Orange circles** = Starting contaminated sample locations (in selected region)
-            - 🔵 **Blue lines** = Downstream flow paths (hydrological connections)
-            - 🟣 **Purple circles** = Downstream contaminated sample locations (found along traced paths)
-            - 📍 **Boundary outline** = Selected region
+            - 📍 **Boundary outline** = Selected region (black=state, gray=county, red=subdivision)
+            - 🟠 **Orange circles** = Contaminated sample locations downstream of facilities
+            - 🔵 **Light blue lines** = Downstream flow paths (streams/rivers)
+            - 🟣 **Purple/pink markers** = Facilities of selected industry type (colored by specific industry)
+            
+            *Use the layer control on the right to toggle layers on/off*
             """)
+            
+            # Display stream names if available
+            if streams_gdf is not None and not streams_gdf.empty and 'streamName' in streams_gdf.columns:
+                stream_names = streams_gdf['streamName'].dropna().unique()
+                if len(stream_names) > 0:
+                    with st.expander(f"🌊 Stream Names ({len(stream_names)} unique streams)"):
+                        st.write(", ".join(sorted(stream_names)))
+        
+        # Data tabs
+        st.markdown("---")
+        st.markdown("### 📊 Data Tables")
+        
+        tab1, tab2, tab3 = st.tabs(["🏭 Facilities", "🌊 Streams", "🧪 Samples"])
+        
+        with tab1:
+            if facilities_df is not None and not facilities_df.empty:
+                st.markdown(f"#### 🏭 {selected_industry}")
+                
+                # Select display columns
+                display_cols = [c for c in ['facilityName', 'industryName', 'industryCode', 'facility'] if c in facilities_df.columns]
+                if display_cols:
+                    st.dataframe(facilities_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(facilities_df, use_container_width=True)
+                
+                st.download_button(
+                    label="📥 Download Facilities CSV",
+                    data=facilities_df.to_csv(index=False),
+                    file_name=f"downstream_facilities_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_facilities"
+                )
+            else:
+                st.info("No facilities found")
+        
+        with tab2:
+            if streams_df is not None and not streams_df.empty:
+                st.markdown("#### 🌊 Downstream Flowlines")
+                
+                # Select display columns
+                display_cols = [c for c in ['streamName', 'fl_type', 'downstream_flowline'] if c in streams_df.columns]
+                if display_cols:
+                    st.dataframe(streams_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(streams_df, use_container_width=True)
+                
+                st.download_button(
+                    label="📥 Download Streams CSV",
+                    data=streams_df.to_csv(index=False),
+                    file_name=f"downstream_streams_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_streams"
+                )
+            else:
+                st.info("No downstream flowlines found")
+        
+        with tab3:
+            if samples_df is not None and not samples_df.empty:
+                st.markdown("#### 🧪 Contaminated Samples Downstream")
+                
+                # Select display columns
+                display_cols = [c for c in ['Max', 'resultCount', 'unit', 'results', 'samplePoint', 'sample'] if c in samples_df.columns]
+                if display_cols:
+                    st.dataframe(samples_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(samples_df, use_container_width=True)
+                
+                # Summary statistics
+                if 'Max' in samples_df.columns:
+                    st.markdown("##### 📈 Concentration Statistics")
+                    try:
+                        max_vals = pd.to_numeric(samples_df['Max'], errors='coerce')
+                        if max_vals.notna().any():
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Max (ng/L)", f"{max_vals.max():.2f}")
+                            with col2:
+                                st.metric("Mean (ng/L)", f"{max_vals.mean():.2f}")
+                            with col3:
+                                st.metric("Median (ng/L)", f"{max_vals.median():.2f}")
+                    except Exception:
+                        pass
+                
+                st.download_button(
+                    label="📥 Download Samples CSV",
+                    data=samples_df.to_csv(index=False),
+                    file_name=f"downstream_samples_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_samples"
+                )
+            else:
+                st.info("No contaminated samples found downstream")
     else:
-        st.info("👈 Select parameters in the sidebar and click 'Execute Query' to run the analysis")
+        st.info("👈 Select a state, county, and industry type in the sidebar, then click 'Execute Query' to run the analysis")
+

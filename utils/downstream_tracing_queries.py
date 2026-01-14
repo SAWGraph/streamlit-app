@@ -2,20 +2,17 @@
 PFAS Downstream Tracing Query Functions
 =======================================
 
-Implements a 3-step pipeline that mirrors the upstream tracing workflow, but
-in the opposite hydrological direction:
+Implements a 3-step pipeline matching the notebook approach:
 
-    Step 1: Find contaminated sample points in a selected region (federation)
-    Step 2: Trace downstream through the HY_FlowPath network (federation)
-    Step 3: Find contaminated sample points in downstream S2 cells (sawgraph)
+    Step 1: Find facilities by NAICS industry type in a region (federation)
+    Step 2: Find downstream flowlines/streams from facility locations (federation)
+    Step 3: Find contaminated samples in downstream S2 cells (federation)
 
-This module is designed to be imported by the Streamlit UI without modifying
-existing upstream/nearby analysis logic.
+This module traces contamination DOWNSTREAM from facilities of specific industry types.
 """
-
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -48,26 +45,6 @@ def parse_sparql_results(results: Optional[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def convertS2ListToQueryString(s2_list: list[str]) -> str:
-    s2_list_formatted = []
-    for s2 in s2_list:
-        if s2.startswith("http://stko-kwg.geog.ucsb.edu/lod/resource/"):
-            s2_list_formatted.append(
-                s2.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:")
-            )
-        elif s2.startswith("https://stko-kwg.geog.ucsb.edu/lod/resource/"):
-            s2_list_formatted.append(
-                s2.replace("https://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:")
-            )
-        elif s2.startswith("kwgr:"):
-            s2_list_formatted.append(s2)
-        elif s2.startswith("http://") or s2.startswith("https://"):
-            s2_list_formatted.append(f"<{s2}>")
-        else:
-            s2_list_formatted.append(s2)
-    return " ".join(s2_list_formatted)
-
-
 def _post_sparql(endpoint: str, query: str, timeout: int) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
     headers = {
         "Accept": "application/sparql-results+json",
@@ -98,6 +75,326 @@ def _post_sparql(endpoint: str, query: str, timeout: int) -> Tuple[Optional[dict
         return None, f"Error: {str(e)}", debug_info
 
 
+def _build_industry_filter(naics_code: Optional[str]) -> str:
+    """
+    Build SPARQL VALUES clause for NAICS industry filtering.
+    
+    - If code is 6 digits (specific industry), filter by industryCode
+    - If code is 4 digits (industry group), filter by industryGroup
+    """
+    if not naics_code:
+        return ""
+    
+    code = str(naics_code).strip()
+    if len(code) > 4:
+        # Specific industry code (e.g., 221320)
+        return f"VALUES ?industryCode {{naics:NAICS-{code}}}."
+    else:
+        # Industry group (e.g., 5622)
+        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}."
+
+
+def _build_region_filter(region_code: Optional[str]) -> str:
+    """
+    Build SPARQL region filter for county/state.
+    """
+    if not region_code:
+        return ""
+    
+    code = str(region_code).strip()
+    if len(code) <= 2:
+        # State code (e.g., "18" for Indiana)
+        return f"""?county rdf:type kwg-ont:AdministrativeRegion_2 ;
+                   kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."""
+    elif len(code) == 5:
+        # County FIPS code (e.g., "23019")
+        state_code = code[:2]
+        return f"""?county rdf:type kwg-ont:AdministrativeRegion_2 ;
+                   kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{state_code} ."""
+    else:
+        # More specific region - not supported in this query style
+        return ""
+
+
+def execute_downstream_facilities_query(
+    naics_code: Optional[str],
+    region_code: Optional[str],
+    timeout: int = 180,
+) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
+    """
+    Step 1: Find facilities by NAICS industry type in a region.
+    
+    Based on notebook q2 query.
+    
+    Returns:
+        DataFrame with columns: facility, facWKT, facilityName, industryCode, industryName
+    """
+    industry_filter = _build_industry_filter(naics_code)
+    region_filter = _build_region_filter(region_code)
+    
+    if not industry_filter:
+        return pd.DataFrame(), "Industry type is required for downstream tracing", {"error": "No industry selected"}
+    
+    query = f"""
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX naics: <http://w3id.org/fio/v1/naics#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX fio: <http://w3id.org/fio/v1/fio#>
+
+SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHERE {{
+    ?facility fio:ofIndustry ?industryGroup;
+        fio:ofIndustry ?industryCode ;
+        spatial:connectedTo ?county ;
+        geo:hasGeometry/geo:asWKT ?facWKT;
+        rdfs:label ?facilityName.
+    {region_filter}
+    ?industryCode a naics:NAICS-IndustryCode;
+        fio:subcodeOf ?industryGroup ;
+        rdfs:label ?industryName.
+    {industry_filter}
+}}
+"""
+
+    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    if error or not results_json:
+        return pd.DataFrame(), error, debug_info
+
+    df = parse_sparql_results(results_json)
+    return df, None, debug_info
+
+
+def execute_downstream_streams_query(
+    naics_code: Optional[str],
+    region_code: Optional[str],
+    timeout: int = 180,
+) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
+    """
+    Step 2: Find downstream flowlines/streams from facilities of the specified industry.
+    
+    Based on notebook q1a query.
+    
+    Returns:
+        DataFrame with columns: downstream_flowline, dsflWKT, fl_type, streamName
+    """
+    industry_filter = _build_industry_filter(naics_code)
+    region_filter = _build_region_filter(region_code)
+    
+    if not industry_filter:
+        return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
+    
+    query = f"""
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX naics: <http://w3id.org/fio/v1/naics#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX fio: <http://w3id.org/fio/v1/fio#>
+PREFIX hyf: <https://www.opengis.net/def/schema/hy_features/hyf/>
+PREFIX nhdplusv2: <http://nhdplusv2.spatialai.org/v1/nhdplusv2#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+
+SELECT DISTINCT ?downstream_flowline ?dsflWKT ?fl_type ?streamName
+WHERE {{
+    {{SELECT ?s2neighbor WHERE {{
+        ?s2neighbor kwg-ont:sfContains ?facility.
+        ?facility fio:ofIndustry ?industryGroup;
+            fio:ofIndustry ?industryCode;
+            spatial:connectedTo ?county.
+        {region_filter}
+        ?industryCode a naics:NAICS-IndustryCode;
+            fio:subcodeOf ?industryGroup ;
+            rdfs:label ?industryName.
+        {industry_filter}
+    }}}}
+    
+    ?s2 kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
+    ?s2neighbor rdf:type kwg-ont:S2Cell_Level13;
+              spatial:connectedTo ?upstream_flowline.
+
+    ?upstream_flowline rdf:type hyf:HY_FlowPath ;
+              hyf:downstreamFlowPathTC ?downstream_flowline .
+    ?downstream_flowline geo:hasGeometry/geo:asWKT ?dsflWKT;
+              nhdplusv2:hasFTYPE ?fl_type.
+    OPTIONAL {{?downstream_flowline rdfs:label ?streamName}}
+}}
+"""
+
+    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    if error or not results_json:
+        return pd.DataFrame(), error, debug_info
+
+    df = parse_sparql_results(results_json)
+    return df, None, debug_info
+
+
+def execute_downstream_samples_query(
+    naics_code: Optional[str],
+    region_code: Optional[str],
+    min_conc: float = 0.0,
+    max_conc: float = 500.0,
+    include_nondetects: bool = False,
+    timeout: int = 300,
+) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
+    """
+    Step 3: Find contaminated samples downstream of facilities.
+    
+    Based on notebook q1 query with concentration filtering.
+    
+    Args:
+        naics_code: NAICS industry code to filter facilities
+        region_code: Region code to filter by location
+        min_conc: Minimum concentration in ng/L
+        max_conc: Maximum concentration in ng/L
+        timeout: Query timeout in seconds
+    
+    Returns:
+        DataFrame with columns: samplePoint, spWKT, sample, samples, resultCount, Max, unit, results
+    """
+    industry_filter = _build_industry_filter(naics_code)
+    region_filter = _build_region_filter(region_code)
+    
+    if not industry_filter:
+        return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
+    
+    # Build concentration filter.
+    # Desired behavior:
+    # - include_nondetects=False: only keep detected numeric results within [min,max]
+    # - include_nondetects=True: keep (detected numeric within [min,max]) OR (non-detect flagged)
+    concentration_filter = (
+        f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {float(min_conc)} && ?numericValue <= {float(max_conc)}) )"
+        if include_nondetects
+        else "\n".join(
+            [
+                "FILTER(!?isNonDetect)",
+                "FILTER(BOUND(?numericValue))",
+                "FILTER(?numericValue > 0)",
+                f"FILTER (?numericValue >= {float(min_conc)})",
+                f"FILTER (?numericValue <= {float(max_conc)})",
+            ]
+        )
+    )
+    
+    query = f"""
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX naics: <http://w3id.org/fio/v1/naics#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX fio: <http://w3id.org/fio/v1/fio#>
+PREFIX hyf: <https://www.opengis.net/def/schema/hy_features/hyf/>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+SELECT DISTINCT ?samplePoint ?spWKT ?sample 
+    (GROUP_CONCAT(DISTINCT ?sampleId; separator="; ") as ?samples) 
+    (COUNT(DISTINCT ?subVal) as ?resultCount) 
+    (MAX(?numericValue) as ?Max) 
+    ?unit 
+    (GROUP_CONCAT(DISTINCT ?subVal; separator=" <br> ") as ?results)
+WHERE {{
+    {{ SELECT DISTINCT ?s2cell WHERE {{
+        ?s2neighbor kwg-ont:sfContains ?facility.
+        ?facility fio:ofIndustry ?industryGroup;
+            fio:ofIndustry ?industryCode;
+            spatial:connectedTo ?county.
+        {region_filter}
+        ?industryCode a naics:NAICS-IndustryCode;
+            fio:subcodeOf ?industryGroup ;
+            rdfs:label ?industryName.
+        {industry_filter}
+        
+        ?s2 kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
+        ?s2neighbor rdf:type kwg-ont:S2Cell_Level13;
+              spatial:connectedTo ?upstream_flowline.
+
+        ?upstream_flowline rdf:type hyf:HY_FlowPath ;
+              hyf:downstreamFlowPathTC ?downstream_flowline .
+        ?s2cell spatial:connectedTo ?downstream_flowline ;
+              rdf:type kwg-ont:S2Cell_Level13 .
+    }}}}
+
+    ?samplePoint kwg-ont:sfWithin ?s2cell;
+        rdf:type coso:SamplePoint;
+        geo:hasGeometry/geo:asWKT ?spWKT.
+    ?s2cell rdf:type kwg-ont:S2Cell_Level13.
+    ?sample coso:fromSamplePoint ?samplePoint;
+        dcterms:identifier ?sampleId;
+        coso:sampleOfMaterialType/rdfs:label ?type.
+    ?observation rdf:type coso:ContaminantObservation;
+        coso:observedAtSamplePoint ?samplePoint;
+        coso:ofDSSToxSubstance/skos:altLabel ?substance;
+        coso:hasResult ?res .
+    ?res coso:measurementValue ?result_value;
+        coso:measurementUnit/qudt:symbol ?unit.
+    OPTIONAL {{ ?res qudt:quantityValue/qudt:numericValue ?numericResult }}
+    OPTIONAL {{ ?res qudt:enumeratedValue ?enumDetected }}
+    BIND(
+      (BOUND(?enumDetected) || LCASE(STR(?result_value)) = "non-detect" || STR(?result_value) = STR(coso:non-detect))
+      as ?isNonDetect
+    )
+    BIND(
+      IF(
+        ?isNonDetect,
+        0,
+        COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
+      ) as ?numericValue
+    )
+    {concentration_filter}
+    BIND((CONCAT(?substance, ": ", str(?result_value) , " ", ?unit) ) as ?subVal)
+
+}} GROUP BY ?samplePoint ?spWKT ?sample ?unit
+"""
+
+    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    if error or not results_json:
+        return pd.DataFrame(), error, debug_info
+
+    df = parse_sparql_results(results_json)
+    return df, None, debug_info
+
+
+# ============================================================================
+# LEGACY FUNCTIONS - Keep for backward compatibility but mark as deprecated
+# ============================================================================
+
+def convertS2ListToQueryString(s2_list: list[str]) -> str:
+    """Convert S2 cell URIs to SPARQL VALUES string format."""
+    s2_list_formatted = []
+    for s2 in s2_list:
+        if s2.startswith("http://stko-kwg.geog.ucsb.edu/lod/resource/"):
+            s2_list_formatted.append(
+                s2.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:")
+            )
+        elif s2.startswith("https://stko-kwg.geog.ucsb.edu/lod/resource/"):
+            s2_list_formatted.append(
+                s2.replace("https://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:")
+            )
+        elif s2.startswith("kwgr:"):
+            s2_list_formatted.append(s2)
+        elif s2.startswith("http://") or s2.startswith("https://"):
+            s2_list_formatted.append(f"<{s2}>")
+        else:
+            s2_list_formatted.append(s2)
+    return " ".join(s2_list_formatted)
+
+
 def execute_downstream_step1_query(
     substance_uri: Optional[str],
     material_uri: Optional[str],
@@ -108,8 +405,9 @@ def execute_downstream_step1_query(
     timeout: int = 180,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """
-    Step 1: Find contaminated sample points in the user-selected region and
-    return sample point + S2 cell identifiers for downstream tracing.
+    DEPRECATED: Legacy Step 1 - Find contaminated sample points in a region.
+    
+    This is kept for backward compatibility but the new approach starts from facilities.
     """
     sanitized_region = str(region_code).strip()
     if not sanitized_region or sanitized_region.lower() == "none":
@@ -186,12 +484,9 @@ def execute_downstream_hydrology_query(
     timeout: int = 180,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str], Dict[str, Any]]:
     """
-    Step 2: Trace downstream S2 cells (and a limited number of flowline WKTs for
-    mapping) starting from the contaminated S2 cells from Step 1.
-
-    Returns:
-        downstream_s2_df: DataFrame with column 's2cell'
-        downstream_flowlines_df: DataFrame with column 'downstream_flowlineWKT'
+    DEPRECATED: Legacy Step 2 - Trace downstream from contaminated samples.
+    
+    The new approach traces from facilities instead.
     """
     if contaminated_samples_df is None or contaminated_samples_df.empty or "s2cell" not in contaminated_samples_df.columns:
         return pd.DataFrame(), pd.DataFrame(), None, {"info": "No starting S2 cells provided."}
@@ -219,18 +514,14 @@ WHERE {{
 
     ?s2start rdf:type kwg-ont:S2Cell_Level13 .
 
-    # Expand to neighboring cells (same pattern used in upstream combined query)
     ?s2neighbor rdf:type kwg-ont:S2Cell_Level13 ;
                 kwg-ont:sfTouches | owl:sameAs ?s2start .
 
-    # Start flowlines connected to the starting (or touching) cells
     ?start_flowline rdf:type hyf:HY_FlowPath ;
                     spatial:connectedTo ?s2neighbor .
 
-    # Trace downstream from the start flowline(s)
     ?start_flowline hyf:downstreamFlowPathTC ?downstream_flowline .
 
-    # Collect downstream S2 cells connected to downstream flowlines
     ?s2cell spatial:connectedTo ?downstream_flowline ;
             rdf:type kwg-ont:S2Cell_Level13 .
 }}
@@ -280,79 +571,3 @@ LIMIT {int(max_flowlines)}
 
     downstream_flowlines_df = parse_sparql_results(flowlines_json)
     return downstream_s2_df, downstream_flowlines_df, None, debug_info
-
-
-def execute_downstream_samples_query(
-    downstream_s2_df: pd.DataFrame,
-    substance_uri: Optional[str],
-    material_uri: Optional[str],
-    min_conc: float,
-    max_conc: float,
-    max_s2_cells: int = 200,
-    timeout: int = 180,
-) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
-    """
-    Step 3: Find contaminated sample points within downstream S2 cells.
-    """
-    if downstream_s2_df is None or downstream_s2_df.empty or "s2cell" not in downstream_s2_df.columns:
-        return pd.DataFrame(), None, {"info": "No downstream S2 cells to search."}
-
-    s2_list = downstream_s2_df["s2cell"].dropna().unique().tolist()
-    if not s2_list:
-        return pd.DataFrame(), None, {"info": "No downstream S2 cells to search."}
-
-    if len(s2_list) > max_s2_cells:
-        s2_list = s2_list[:max_s2_cells]
-
-    s2_values_string = convertS2ListToQueryString(s2_list)
-
-    substance_filter = f"VALUES ?substance {{<{substance_uri}>}}" if substance_uri else ""
-    material_filter = f"VALUES ?matType {{<{material_uri}>}}" if material_uri else ""
-
-    query = f"""
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
-PREFIX qudt: <http://qudt.org/schema/qudt/>
-PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
-PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
-PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
-
-SELECT DISTINCT (COUNT(DISTINCT ?subVal) as ?resultCount) (MAX(?result_value) as ?max)
-                ?sp ?spWKT
-WHERE {{
-    VALUES ?s2cell {{ {s2_values_string} }}
-
-    ?sp rdf:type coso:SamplePoint ;
-        geo:hasGeometry/geo:asWKT ?spWKT ;
-        spatial:connectedTo ?s2cell .
-
-    ?observation rdf:type coso:ContaminantObservation ;
-        coso:observedAtSamplePoint ?sp ;
-        coso:ofSubstance ?substance ;
-        coso:analyzedSample ?sample ;
-        coso:hasResult ?result .
-
-    ?sample coso:sampleOfMaterialType ?matType .
-    ?result coso:measurementValue ?result_value ;
-            coso:measurementUnit ?unit .
-    ?unit qudt:symbol ?unit_sym .
-
-    VALUES ?unit {{<http://qudt.org/vocab/unit/NanoGM-PER-L>}}
-    {substance_filter}
-    {material_filter}
-    FILTER (?result_value >= {float(min_conc)})
-    FILTER (?result_value <= {float(max_conc)})
-
-    BIND((CONCAT(str(?result_value) , " ", ?unit_sym)) as ?subVal)
-}}
-GROUP BY ?sp ?spWKT
-"""
-
-    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["sawgraph"], query, timeout=timeout)
-    if error or not results_json:
-        return pd.DataFrame(), error, debug_info
-
-    df = parse_sparql_results(results_json)
-    return df, None, debug_info
-

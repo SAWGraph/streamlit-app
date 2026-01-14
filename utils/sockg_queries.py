@@ -91,13 +91,14 @@ def get_sockg_locations(state_code: Optional[str] = None) -> pd.DataFrame:
     Fetch SOCKG locations (optionally filtered by state).
 
     Args:
-        state_code: Optional 2-digit FIPS state code
+        state_code: Optional 2-digit FIPS state code (e.g., "19" for Iowa)
     """
+    # Build state filter - URIs use zero-padded 2-digit codes (e.g., USA.01 not USA.1)
     state_filter = ""
     if state_code:
-        state_filter = (
-            f"?s2 spatial:connectedTo kwgr:administrativeRegion.USA.{str(state_code).zfill(2)} ."
-        )
+        code = str(state_code).strip().zfill(2)  # Ensure 2-digit padded code
+        state_filter = f"?s2 spatial:connectedTo kwgr:administrativeRegion.USA.{code} ."
+        print(f"SOCKG locations: Filtering for state code '{code}' (USA.{code})")
 
     query = f"""
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -119,6 +120,11 @@ WHERE {{
     {state_filter}
 }}
 """
+    # Store query for debug if needed
+    if 'query_debug' not in globals():
+        globals()['query_debug'] = {}
+    globals()['query_debug']['locations'] = query
+
     results = _execute_sparql_query(query)
     df = _parse_sparql_results(results)
     if df.empty:
@@ -131,13 +137,14 @@ def get_sockg_facilities(state_code: Optional[str] = None) -> pd.DataFrame:
     Fetch facilities near SOCKG locations (optionally filtered by state).
 
     Args:
-        state_code: Optional 2-digit FIPS state code
+        state_code: Optional 2-digit FIPS state code (e.g., "19" for Iowa)
     """
+    # Build state filter - URIs use zero-padded 2-digit codes (e.g., USA.01 not USA.1)
     state_filter = ""
     if state_code:
-        state_filter = (
-            f"?s2 spatial:connectedTo kwgr:administrativeRegion.USA.{str(state_code).zfill(2)} ."
-        )
+        code = str(state_code).strip().zfill(2)  # Ensure 2-digit padded code
+        state_filter = f"?s2 spatial:connectedTo kwgr:administrativeRegion.USA.{code} ."
+        print(f"SOCKG facilities: Filtering for state code '{code}' (USA.{code})")
 
     query = f"""
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -148,6 +155,7 @@ PREFIX dcterms: <http://purl.org/dc/terms/>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX sockg: <https://idir.uta.edu/sockg-ontology#>
 PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
 PREFIX fio: <http://w3id.org/fio/v1/fio#>
 PREFIX naics: <http://w3id.org/fio/v1/naics#>
 PREFIX fio-pfas:  <http://w3id.org/fio/v1/pfas#>
@@ -186,6 +194,11 @@ WHERE {{
 }}
 GROUP BY ?facility ?facilityName ?facWKT ?PFASusing ?industrySector ?industrySubsector
 """
+    # Store query for debug if needed
+    if 'query_debug' not in globals():
+        globals()['query_debug'] = {}
+    globals()['query_debug']['facilities'] = query
+
     results = _execute_sparql_query(query)
     df = _parse_sparql_results(results)
     if df.empty:

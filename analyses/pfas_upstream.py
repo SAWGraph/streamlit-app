@@ -2,6 +2,8 @@
 PFAS Upstream Tracing Analysis (Query 1)
 Trace contamination upstream to identify potential sources
 """
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 import folium
@@ -230,14 +232,6 @@ def main(context: AnalysisContext) -> None:
         # Display selected range clearly
         st.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
 
-        # Show concentration context
-        if max_concentration <= 10:
-            st.info("🟢 Low range - background levels")
-        elif max_concentration <= 70:
-            st.info("🟡 Moderate range - measurable contamination")
-        else:
-            st.warning("🔴 High range - significant concern")
-    
         # Execute Query Button
         st.markdown("---")
         county_selected = context.selected_county_code is not None
@@ -307,6 +301,7 @@ def main(context: AnalysisContext) -> None:
                         effective_min,
                         max_concentration,
                         context.region_code,
+                        include_nondetects=include_nondetects,
                     )
 
                 if samples_df is None:
@@ -438,8 +433,11 @@ def main(context: AnalysisContext) -> None:
                     st.metric("Material Type", saved_material_name or "All")
             with col4:
                 if 'result_value' in samples_df.columns:
-                    avg_value = samples_df['result_value'].astype(float).mean()
-                    st.metric("Avg Concentration", f"{avg_value:.2f} ng/L")
+                    # result_value can be non-numeric when non-detects are included (e.g., URI or flag),
+                    # so coerce to numeric for safe aggregation.
+                    avg_value = pd.to_numeric(samples_df['result_value'], errors='coerce').mean()
+                    if pd.notna(avg_value):
+                        st.metric("Avg Concentration", f"{avg_value:.2f} ng/L")
                 elif 'max' in samples_df.columns:
                     avg_value = pd.to_numeric(samples_df['max'], errors='coerce').mean()
                     if pd.notna(avg_value):

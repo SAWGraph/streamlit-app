@@ -2,6 +2,8 @@
 Samples Near Facilities Analysis (Query 2)
 Find contaminated samples near facilities of a specific industry type
 """
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 import folium
@@ -27,7 +29,7 @@ def main(context: AnalysisContext) -> None:
     
     st.markdown("""
     **What this analysis does:**
-    - Find all facilities of a specific industry type in your region
+    - Find all facilities of a specific industry type (optionally filtered by region)
     - Expand search to neighboring areas (S2 cells)
     - Identify contaminated samples near those facilities
     
@@ -52,14 +54,16 @@ def main(context: AnalysisContext) -> None:
     # --- SIDEBAR PARAMETERS ---
     # Industry selector using hierarchical tree dropdown (outside form for compatibility)
     st.sidebar.markdown("### 🏭 Industry Type")
+    st.sidebar.markdown("_Optional: leave empty to search all industries_")
     selected_naics_code = render_hierarchical_naics_selector(
         naics_dict=NAICS_INDUSTRIES,
         key=f"{analysis_key}_industry_selector",
-        default_value="221320"  # Default to Sewage Treatment Facilities
+        default_value=None,  # No default - allow unrestricted search
+        allow_empty=True,  # Allow empty selection for all industries
     )
 
     # Get display name for selected code
-    selected_industry_display = f"{selected_naics_code} - {NAICS_INDUSTRIES.get(selected_naics_code, 'Unknown')}" if selected_naics_code else "No selection"
+    selected_industry_display = f"{selected_naics_code} - {NAICS_INDUSTRIES.get(selected_naics_code, 'Unknown')}" if selected_naics_code else "All Industries"
 
     # Other parameters in a form
     with st.sidebar.form(key=f"{analysis_key}_params_form"):
@@ -130,55 +134,37 @@ def main(context: AnalysisContext) -> None:
         # Display selected range clearly
         st.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
 
-        # Show concentration context
-        if max_concentration <= 10:
-            st.info("🟢 Low range - background levels")
-        elif max_concentration <= 70:
-            st.info("🟡 Moderate range - measurable contamination")
-        else:
-            st.warning("🔴 High range - significant concern")
-        
         st.markdown("---")
 
-        # Execute button
-        county_selected = context.selected_county_code is not None
-        industry_selected = selected_naics_code is not None and selected_naics_code != ""
-        can_execute = county_selected and industry_selected
-
+        # Execute button - both region and industry are now optional
         execute_button = st.form_submit_button(
             "🔍 Execute Query",
             type="primary",
             use_container_width=True,
-            disabled=not can_execute,
-            help="Select a county and industry type first" if not can_execute else "Execute the nearby facilities analysis"
+            help="Execute the nearby facilities analysis (optionally filter by region and/or industry)"
         )
 
     # Execute the query when form is submitted
     if execute_button:
-        if not context.selected_state_code:
-            st.error("❌ Please select a state in the sidebar first!")
-        elif not selected_naics_code:
-            st.error("❌ Please select an industry type first!")
-        else:
-            region_boundary_df = None
-            with st.spinner(f"Searching for samples near {selected_industry_display}..."):
-                # Execute the consolidated analysis (single query)
-                facilities_df, samples_df = execute_nearby_analysis(
-                    naics_code=selected_naics_code,
-                    region_code=context.region_code,
-                    min_concentration=min_concentration,
-                    max_concentration=max_concentration,
-                    include_nondetects=include_nondetects
-                )
-                region_boundary_df = get_region_boundary(context.region_code)
-                
-                # Store results in session state
-                st.session_state[facilities_key] = facilities_df
-                st.session_state[samples_key] = samples_df
-                st.session_state[industry_key] = selected_industry_display
-                st.session_state[region_code_key] = context.region_code
-                st.session_state[f"{analysis_key}_region_boundary_df"] = region_boundary_df
-                st.session_state[executed_key] = True
+        region_boundary_df = None
+        with st.spinner(f"Searching for samples near {selected_industry_display}..."):
+            # Execute the consolidated analysis (single query)
+            facilities_df, samples_df = execute_nearby_analysis(
+                naics_code=selected_naics_code,
+                region_code=context.region_code,
+                min_concentration=min_concentration,
+                max_concentration=max_concentration,
+                include_nondetects=include_nondetects
+            )
+            region_boundary_df = get_region_boundary(context.region_code)
+            
+            # Store results in session state
+            st.session_state[facilities_key] = facilities_df
+            st.session_state[samples_key] = samples_df
+            st.session_state[industry_key] = selected_industry_display
+            st.session_state[region_code_key] = context.region_code
+            st.session_state[f"{analysis_key}_region_boundary_df"] = region_boundary_df
+            st.session_state[executed_key] = True
     
     # Display Results
     if st.session_state.get(executed_key, False):
@@ -268,17 +254,42 @@ def main(context: AnalysisContext) -> None:
                             samples_gdf['geometry'] = samples_gdf['spWKT'].apply(wkt.loads)
                             samples_gdf = gpd.GeoDataFrame(samples_gdf, geometry='geometry', crs='EPSG:4326')
                             
-                            samples_gdf.explore(
+                            # Keep popups focused: prefer datedresults and avoid redundant results/dates.
+                            # We drop redundant columns from the map layer itself so they can't appear even if
+                            # Folium/GeoPandas falls back to "show all properties".
+                            samples_map_gdf = samples_gdf.drop(
+                                columns=[c for c in ["results", "dates"] if c in samples_gdf.columns],
+                                errors="ignore",
+                            )
+
+                            # Clean up unit encoding (matches notebook behavior)
+                            for col in ("unit", "datedresults", "results"):
+                                if col in samples_map_gdf.columns:
+                                    s = samples_map_gdf[col]
+                                    mask = s.notna()
+                                    samples_map_gdf.loc[mask, col] = (
+                                        s.loc[mask].astype(str).str.replace("Î¼", "μ")
+                                    )
+                            sample_popup_fields = [
+                                c
+                                for c in ["resultCount", "max", "datedresults", "Materials", "Type", "spName"]
+                                if c in samples_map_gdf.columns
+                            ]
+                            if not sample_popup_fields and "datedresults" in samples_map_gdf.columns:
+                                sample_popup_fields = ["datedresults"]
+
+                            samples_map_gdf.explore(
                                 m=map_obj,
-                                name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_gdf)})</span>',
+                                name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_map_gdf)})</span>',
                                 color='DarkOrange',
                                 marker_kwds=dict(radius=6),
-                                popup=['substances', 'materials', 'maxConcentration'] if all(c in samples_gdf.columns for c in ['substances', 'materials']) else True,
+                                popup=sample_popup_fields if sample_popup_fields else ["datedresults"],
+                                popup_kwds={'max_height': 450, 'max_width': 450},
                                 show=True
                             )
                         
                         # Add layer control
-                        folium.LayerControl(collapsed=False).add_to(map_obj)
+                        folium.LayerControl(collapsed=True).add_to(map_obj)
                         
                         # Display map
                         st_folium(map_obj, width=None, height=600, returned_objects=[])
@@ -311,24 +322,37 @@ def main(context: AnalysisContext) -> None:
             with tab3:
                 if not samples_df.empty:
                     st.markdown("#### 🧪 Contaminated Sample Points")
+
+                    # Clean up unit encoding for display (matches notebook behavior)
+                    samples_display_df = samples_df.copy()
+                    for col in ("unit", "datedresults", "results"):
+                        if col in samples_display_df.columns:
+                            s = samples_display_df[col]
+                            mask = s.notna()
+                            samples_display_df.loc[mask, col] = (
+                                s.loc[mask].astype(str).str.replace("Î¼", "μ")
+                            )
                     
                     # Select display columns
-                    display_cols = [c for c in ['maxConcentration', 'substances', 'materials', 'resultCount', 'sp'] if c in samples_df.columns]
+                    display_cols = [
+                        c for c in ['max', 'resultCount', 'datedresults', 'Materials', 'Type', 'spName', 'sp']
+                        if c in samples_display_df.columns
+                    ]
                     if display_cols:
-                        st.dataframe(samples_df[display_cols], use_container_width=True)
+                        st.dataframe(samples_display_df[display_cols], use_container_width=True)
                     else:
-                        st.dataframe(samples_df, use_container_width=True)
+                        st.dataframe(samples_display_df, use_container_width=True)
                     
                     # Summary statistics
-                    if 'maxConcentration' in samples_df.columns:
+                    if 'max' in samples_display_df.columns:
                         st.markdown("##### 📈 Concentration Statistics")
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Max (ng/L)", f"{samples_df['maxConcentration'].max():.2f}")
+                            st.metric("Max (ng/L)", f"{samples_display_df['max'].max():.2f}")
                         with col2:
-                            st.metric("Mean (ng/L)", f"{samples_df['maxConcentration'].mean():.2f}")
+                            st.metric("Mean (ng/L)", f"{samples_display_df['max'].mean():.2f}")
                         with col3:
-                            st.metric("Median (ng/L)", f"{samples_df['maxConcentration'].median():.2f}")
+                            st.metric("Median (ng/L)", f"{samples_display_df['max'].median():.2f}")
                 else:
                     st.info("No contaminated samples found near the selected facilities")
         else:

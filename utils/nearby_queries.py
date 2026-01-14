@@ -6,6 +6,7 @@ using a single federated SPARQL query.
 Similar to upstream tracing, this uses the federation endpoint to combine
 data from multiple knowledge graphs in one query.
 """
+from __future__ import annotations
 
 import pandas as pd
 import requests
@@ -20,9 +21,41 @@ ENDPOINTS = {
 }
 
 # Common NAICS industry codes for the dropdown
-# Includes both specific industry codes (5-6 digits) and industry groups (3-4 digits)
+# Includes sector codes (2 digits), subsector codes (3 digits), industry groups (4 digits), and specific industries (5-6 digits)
 NAICS_INDUSTRIES = {
-    # Water & Waste Management
+    # ===========================================
+    # 2-DIGIT SECTOR CODES (Official NAICS from U.S. Census Bureau)
+    # Source: https://www.census.gov/naics/
+    # Note: 31-33 = Manufacturing, 44-45 = Retail Trade, 48-49 = Transportation
+    # ===========================================
+    "11": "Agriculture, Forestry, Fishing and Hunting",
+    "21": "Mining, Quarrying, and Oil and Gas Extraction",
+    "22": "Utilities",
+    "23": "Construction",
+    "31": "Manufacturing (31-33 range)",
+    "32": "Manufacturing (31-33 range)",
+    "33": "Manufacturing (31-33 range)",
+    "42": "Wholesale Trade",
+    "44": "Retail Trade (44-45 range)",
+    "45": "Retail Trade (44-45 range)",
+    "48": "Transportation and Warehousing (48-49 range)",
+    "49": "Transportation and Warehousing (48-49 range)",
+    "51": "Information",
+    "52": "Finance and Insurance",
+    "53": "Real Estate and Rental and Leasing",
+    "54": "Professional, Scientific, and Technical Services",
+    "55": "Management of Companies and Enterprises",
+    "56": "Administrative and Support and Waste Management and Remediation Services",
+    "61": "Educational Services",
+    "62": "Health Care and Social Assistance",
+    "71": "Arts, Entertainment, and Recreation",
+    "72": "Accommodation and Food Services",
+    "81": "Other Services (except Public Administration)",
+    "92": "Public Administration",
+    
+    # ===========================================
+    # Water & Waste Management (Subsectors and Industries)
+    # ===========================================
     "221310": "Water Supply and Irrigation Systems",
     "221320": "Sewage Treatment Facilities",
     "562111": "Solid Waste Collection",
@@ -269,6 +302,24 @@ def execute_sparql_query(endpoint: str, query: str, method: str = 'POST', timeou
         return None
 
 
+def _build_industry_values_clause(naics_codes: list[str]) -> str:
+    """
+    Build a VALUES clause for industry filtering (notebook style).
+    Returns empty string if no codes provided.
+    """
+    if not naics_codes:
+        return ""
+    
+    # For now, take the first code (UI typically selects one)
+    code = naics_codes[0]
+    
+    # Industry codes > 4 digits are specific codes, <= 4 are groups
+    if len(code) > 4:
+        return f"VALUES ?industryCode {{naics:NAICS-{code}}}."
+    else:
+        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}."
+
+
 def execute_nearby_analysis(
     naics_code: str | list[str],
     region_code: Optional[str],
@@ -277,26 +328,21 @@ def execute_nearby_analysis(
     include_nondetects: bool = False
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Execute the complete "Samples Near Facilities" analysis in ONE consolidated query.
+    Execute the complete "Samples Near Facilities" analysis using separate queries
+    matching the notebook approach (SAWGraph_Y3_Demo_NearbyFacilities.ipynb).
 
-    This is similar to how the upstream tracing works - one big federated query
-    that combines facility data, spatial relationships, and contamination data.
-
-    The query finds:
-    1. Facilities of the specified NAICS industry type
-    2. S2 cells containing/neighboring those facilities
-    3. Contaminated samples in those S2 cells
-    4. All filtered to the specified region
+    Query 1: Get all facilities of the specified industry type
+    Query 2: Get samples near those facilities using S2 cell neighbor subquery
 
     Args:
         naics_code: NAICS industry code(s) to search for
-        region_code: FIPS region code (state or county)
+        region_code: FIPS region code (state or county) - optional
         min_concentration: Minimum contamination threshold (ng/L)
         max_concentration: Maximum contamination threshold (ng/L)
         include_nondetects: If True, include samples with zero concentration
 
     Returns:
-        Tuple of (facilities_df, samples_df) - S2 cells are internal only
+        Tuple of (facilities_df, samples_df)
     """
     naics_codes = _normalize_naics_codes(naics_code)
     industry_label = ", ".join(naics_codes) if naics_codes else "ALL industries"
@@ -308,28 +354,97 @@ def execute_nearby_analysis(
     print(f"Include nondetects: {include_nondetects}")
     print(f"{'='*60}\n")
     
-    industry_filter = _build_industry_filter(naics_codes)
+    # Build industry filter using VALUES clause (notebook style)
+    industry_values = _build_industry_values_clause(naics_codes)
     
+    # Build region filter (optional).
+    # IMPORTANT: filter on the facility-connected county (not S2 cells), so state + county behave correctly.
+    # - state (2 digits): keep counties within the selected state
+    # - county (5 digits): restrict to that county
+    sanitized_region = str(region_code).strip() if region_code else ""
     region_filter = ""
-    if region_code:
-        sanitized_region = str(region_code).strip()
-        if sanitized_region:
-            region_filter = (
-                f"?s2cellFacility spatial:connectedTo "
-                f"kwgr:administrativeRegion.USA.{sanitized_region} ."
-            )
+    if sanitized_region:
+        if len(sanitized_region) == 2:
+            region_filter = f"""
+    ?county rdf:type kwg-ont:AdministrativeRegion_2 ;
+            kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{sanitized_region} .
+"""
+        elif len(sanitized_region) == 5:
+            region_filter = f"""
+    VALUES ?county {{ kwgr:administrativeRegion.USA.{sanitized_region} }} .
+"""
+        else:
+            # Subdivision / other codes not currently supported for this analysis
+            region_filter = ""
     
     # =========================================================================
-    # CONSOLIDATED QUERY: Facilities + Neighboring S2 Cells + Samples
-    # This single query does what previously required 5 separate queries
+    # QUERY 1: Get facilities (matches notebook q2)
+    # =========================================================================
+    facilities_query = f"""
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX naics: <http://w3id.org/fio/v1/naics#>
+PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
+PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>
+PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
+PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX fio: <http://w3id.org/fio/v1/fio#>
+
+SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHERE {{
+    ?facility fio:ofIndustry ?industryGroup;
+              fio:ofIndustry ?industryCode;
+              spatial:connectedTo ?county;
+              geo:hasGeometry/geo:asWKT ?facWKT;
+              rdfs:label ?facilityName.
+    {region_filter}
+    ?industryCode a naics:NAICS-IndustryCode;
+                  fio:subcodeOf ?industryGroup;
+                  rdfs:label ?industryName.
+    {industry_values}
+}}
+"""
+    
+    print("--- Query 1: Fetching facilities ---")
+    facilities_result = execute_sparql_query(ENDPOINTS['federation'], facilities_query, timeout=300)
+    facilities_df = parse_sparql_results(facilities_result)
+    
+    if not facilities_df.empty:
+        print(f"   > Found {len(facilities_df)} facilities")
+    else:
+        print("   > No facilities found")
+    
+    # =========================================================================
+    # QUERY 2: Get samples near facilities (matches notebook q5)
+    # Uses subquery for S2 neighbors exactly as in notebook
     # =========================================================================
     
-    query = f"""
+    # Build concentration filter.
+    # Desired behavior:
+    # - include_nondetects=False: only keep detected numeric results within [min,max]
+    # - include_nondetects=True: keep (detected numeric within [min,max]) OR (non-detect flagged)
+    concentration_filter = ""
+    if include_nondetects:
+        concentration_filter = (
+            f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_concentration} && ?numericValue <= {max_concentration}) )"
+        )
+    else:
+        concentration_filter = "\n".join(
+            [
+                "FILTER(!?isNonDetect)",
+                "FILTER(BOUND(?numericValue))",
+                "FILTER(?numericValue > 0)",
+                f"FILTER (?numericValue >= {min_concentration} && ?numericValue <= {max_concentration})",
+            ]
+        )
+    
+    samples_query = f"""
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX owl: <http://www.w3.org/2002/07/owl#>
 PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX spatial: <http://purl.org/spatialai/spatial/spatial-full#>
 PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
@@ -339,123 +454,85 @@ PREFIX naics: <http://w3id.org/fio/v1/naics#>
 PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
 PREFIX qudt: <http://qudt.org/schema/qudt/>
 
-SELECT DISTINCT
-    ?facility ?facWKT ?facilityName ?industryCode ?industryName ?industryGroup
-    ?sp ?spName ?spWKT
-    (COUNT(DISTINCT ?observation) as ?resultCount)
-    (MAX(?numericValue) as ?max)
-    (GROUP_CONCAT(DISTINCT ?subVal; separator="</br>") as ?results)
-    (GROUP_CONCAT(DISTINCT ?datedSubVal; separator="</br>") as ?datedresults)
-    (GROUP_CONCAT(?year; separator=" </br> ") as ?dates)
-    (GROUP_CONCAT(DISTINCT ?Typelabels; separator=";") as ?Type)
-    (GROUP_CONCAT(DISTINCT ?material; separator=";") as ?Materials)
+SELECT DISTINCT (COUNT(DISTINCT ?observation) as ?resultCount) (MAX(?numericValue) as ?max) (GROUP_CONCAT(DISTINCT ?subVal; separator="</br>") as ?results) (GROUP_CONCAT(DISTINCT ?datedSubVal; separator="</br>") as ?datedresults) (GROUP_CONCAT(?year; separator=" </br> ") as ?dates) (GROUP_CONCAT(DISTINCT ?Typelabels; separator=";") as ?Type) (GROUP_CONCAT(DISTINCT ?material) as ?Materials) ?sp ?spName ?spWKT
 WHERE {{
-    # Step 1: Find facilities of the specified industry type
-    ?facility fio:ofIndustry ?industryGroup;
-              fio:ofIndustry ?industryCode;
-              geo:hasGeometry/geo:asWKT ?facWKT;
-              rdfs:label ?facilityName.
-    ?industryCode a naics:NAICS-IndustryCode;
-                  fio:subcodeOf ?industryGroup;
-                  rdfs:label ?industryName.
-    {industry_filter}
-    
-    # Step 2: Find S2 cells that contain these facilities
-    ?s2cellFacility rdf:type kwg-ont:S2Cell_Level13;
-                    kwg-ont:sfContains ?facility.
-    
-    # Step 3: Optionally filter S2 cells to the specified region AND get neighboring cells
-    {region_filter}
-    ?s2cellFacility kwg-ont:sfTouches|owl:sameAs ?s2cellNeighbor.
-    
-    # Step 4: Find contaminated samples in those S2 cells (facility cell + neighbors)
+
+    {{SELECT DISTINCT ?s2neighbor WHERE {{
+        ?s2cell rdf:type kwg-ont:S2Cell_Level13 ;
+                kwg-ont:sfContains ?facility.
+        ?facility fio:ofIndustry ?industryGroup;
+                  fio:ofIndustry ?industryCode;
+                  spatial:connectedTo ?county .
+        {region_filter}
+        ?industryCode a naics:NAICS-IndustryCode;
+                      fio:subcodeOf ?industryGroup;
+                      rdfs:label ?industryName.
+        {industry_values}
+        ?s2neighbor kwg-ont:sfTouches|owl:sameAs ?s2cell.
+    }} }}
+
     ?sp rdf:type coso:SamplePoint;
-        spatial:connectedTo ?s2cellNeighbor;
+        spatial:connectedTo ?s2neighbor;
         rdfs:label ?spName;
         geo:hasGeometry/geo:asWKT ?spWKT.
-    
-    # Step 5: Get contamination observations at those sample points
     ?observation rdf:type coso:ContaminantObservation;
         coso:observedAtSamplePoint ?sp;
         coso:ofSubstance ?substance1;
         coso:observedTime ?time;
         coso:analyzedSample ?sample;
         coso:hasResult ?result.
-
     ?sample rdfs:label ?sampleLabel;
-      coso:sampleOfMaterialType/rdfs:label ?material.
-    {{
-      SELECT ?sample (GROUP_CONCAT(DISTINCT ?sampleClassLabel; separator=";") as ?Typelabels) WHERE {{
+            coso:sampleOfMaterialType/rdfs:label ?material.
+    {{SELECT ?sample (GROUP_CONCAT(DISTINCT ?sampleClassLabel; separator=";") as ?Typelabels) WHERE {{
         ?sample a ?sampleClass.
         ?sampleClass rdfs:label ?sampleClassLabel.
-        VALUES ?sampleClass {{
-          coso:WaterSample coso:AnimalMaterialSample coso:PlantMaterialSample coso:SolidMaterialSample
-        }}
-      }} GROUP BY ?sample
-    }}
-
+        VALUES ?sampleClass {{coso:WaterSample coso:AnimalMaterialSample coso:PlantMaterialSample coso:SolidMaterialSample}}
+    }} GROUP BY ?sample }}
     ?result coso:measurementValue ?result_value;
-            coso:measurementUnit ?unit .
+            coso:measurementUnit ?unit.
     OPTIONAL {{ ?result qudt:quantityValue/qudt:numericValue ?numericResult }}
-    BIND(COALESCE(?numericResult, ?result_value) as ?numericValue)
+    OPTIONAL {{ ?result qudt:enumeratedValue ?enumDetected }}
+    # Non-detect detection: enumeratedValue OR explicit "non-detect" value (string/URI)
+    BIND(
+      (BOUND(?enumDetected) || LCASE(STR(?result_value)) = "non-detect" || STR(?result_value) = STR(coso:non-detect))
+      as ?isNonDetect
+    )
+    # Numeric value for detected results (best-effort). For non-detects, numericValue is 0 (but we still keep them via ?isNonDetect).
+    # IMPORTANT: if this is a non-detect row, force numericValue=0 even if numericResult exists
+    # (numericResult can sometimes represent detection limit / other non-detect quantities).
+    BIND(
+      IF(
+        ?isNonDetect,
+        0,
+        COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
+      ) as ?numericValue
+    )
     ?substance1 rdfs:label ?substance.
     ?unit qudt:symbol ?unit_sym.
-
-    # Filter by concentration range (include nondetects if requested)
-    FILTER (?numericValue >= {0 if include_nondetects else min_concentration} && ?numericValue <= {max_concentration})
-
+    {concentration_filter}
     BIND(SUBSTR(?time, 1, 7) as ?year)
     BIND(CONCAT('<b>',str(?result_value), '</b>', " ", ?unit_sym, " ", ?substance) as ?subVal)
     BIND(CONCAT(?year, ' <b> ',str(?result_value), '</b>', " ", ?unit_sym, " ", ?substance) as ?datedSubVal)
-}}
-GROUP BY ?facility ?facWKT ?facilityName ?industryCode ?industryName ?industryGroup ?sp ?spName ?spWKT
+}} GROUP BY ?sp ?spName ?spWKT
+ORDER BY DESC(?max)
 """
     
-    print("--- Running consolidated federated query ---")
-    print("   > Querying facilities, neighbors, and samples in one query...")
+    print("--- Query 2: Fetching samples near facilities ---")
+    samples_result = execute_sparql_query(ENDPOINTS['federation'], samples_query, timeout=300)
+    samples_df = parse_sparql_results(samples_result)
     
-    # Try the consolidated query first (federation endpoint)
-    results = execute_sparql_query(ENDPOINTS['federation'], query, timeout=300)
-    combined_df = parse_sparql_results(results)
-    
-    if not combined_df.empty:
-        print(f"   > Consolidated query returned {len(combined_df)} results")
-        
-        # Extract facilities (unique facilities)
-        facility_cols = ['facility', 'facWKT', 'facilityName', 'industryCode', 'industryName']
-        facilities_df = combined_df[facility_cols].drop_duplicates(subset=['facility'])
-        
-        # Extract samples (unique samples)
-        sample_cols = [
-            'sp',
-            'spName',
-            'spWKT',
-            'resultCount',
-            'max',
-            'results',
-            'datedresults',
-            'dates',
-            'Type',
-            'Materials',
-        ]
-        sample_cols = [c for c in sample_cols if c in combined_df.columns]
-        samples_df = combined_df[sample_cols].drop_duplicates(subset=['sp'])
+    if not samples_df.empty:
+        print(f"   > Found {len(samples_df)} sample points")
         samples_df = _normalize_samples_df(samples_df)
-        
-        print(f"\n{'='*60}")
-        print(f"ANALYSIS COMPLETE")
-        print(f"  - Facilities in region: {len(facilities_df)}")
-        print(f"  - Contaminated samples nearby: {len(samples_df)}")
-        print(f"{'='*60}\n")
-        
-        return facilities_df, samples_df
+    else:
+        print("   > No samples found near facilities")
     
-    # If consolidated query fails or returns empty, try fallback approach
-    print("   > Consolidated query returned no results, trying fallback...")
-    facilities_df, samples_df = _execute_fallback_analysis(
-        naics_codes, region_code, min_concentration, max_concentration, include_nondetects
-    )
-    samples_df = _normalize_samples_df(samples_df)
+    print(f"\n{'='*60}")
+    print(f"ANALYSIS COMPLETE")
+    print(f"  - Facilities: {len(facilities_df)}")
+    print(f"  - Sample points nearby: {len(samples_df)}")
+    print(f"{'='*60}\n")
+    
     return facilities_df, samples_df
 
 
@@ -489,7 +566,12 @@ def _execute_fallback_analysis(
         return facilities_df, pd.DataFrame()
     
     # Step 3: Find samples in those S2 cells
-    samples_df = _get_samples_in_cells(s2_cells, effective_min, max_concentration)
+    samples_df = _get_samples_in_cells(
+        s2_cells,
+        effective_min,
+        max_concentration,
+        include_nondetects=include_nondetects,
+    )
     
     print(f"\n{'='*60}")
     print(f"FALLBACK ANALYSIS COMPLETE")
@@ -606,7 +688,12 @@ SELECT DISTINCT ?s2cellNeighbor WHERE {{
     return df
 
 
-def _get_samples_in_cells(s2_cells_df: pd.DataFrame, min_concentration: float, max_concentration: float) -> pd.DataFrame:
+def _get_samples_in_cells(
+    s2_cells_df: pd.DataFrame,
+    min_concentration: float,
+    max_concentration: float,
+    include_nondetects: bool = False,
+) -> pd.DataFrame:
     """Find contaminated samples within specified S2 cells"""
     if s2_cells_df.empty:
         return pd.DataFrame()
@@ -616,6 +703,18 @@ def _get_samples_in_cells(s2_cells_df: pd.DataFrame, min_concentration: float, m
     s2_list_prefixed = [uri.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:") for uri in s2_list]
     s2_values_string = " ".join(s2_list_prefixed)
     
+    concentration_filter = (
+        f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_concentration} && ?numericValue <= {max_concentration}) )"
+        if include_nondetects
+        else "\n".join(
+            [
+                "FILTER(!?isNonDetect)",
+                "FILTER(BOUND(?numericValue))",
+                "FILTER(?numericValue > 0)",
+                f"FILTER (?numericValue >= {min_concentration} && ?numericValue <= {max_concentration})",
+            ]
+        )
+    )
     query = f"""
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -665,10 +764,21 @@ WHERE {{
     ?result coso:measurementValue ?result_value;
         coso:measurementUnit ?unit .
     OPTIONAL {{ ?result qudt:quantityValue/qudt:numericValue ?numericResult }}
-    BIND(COALESCE(?numericResult, ?result_value) as ?numericValue)
+    OPTIONAL {{ ?result qudt:enumeratedValue ?enumDetected }}
+    BIND(
+      (BOUND(?enumDetected) || LCASE(STR(?result_value)) = "non-detect" || STR(?result_value) = STR(coso:non-detect))
+      as ?isNonDetect
+    )
+    BIND(
+      IF(
+        ?isNonDetect,
+        0,
+        COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
+      ) as ?numericValue
+    )
     ?substance1 rdfs:label ?substance.
     ?unit qudt:symbol ?unit_sym.
-    FILTER (?numericValue >= {min_concentration} && ?numericValue <= {max_concentration})
+    {concentration_filter}
     BIND(SUBSTR(?time, 1, 7) as ?year)
     BIND(CONCAT('<b>',str(?result_value), '</b>', " ", ?unit_sym, " ", ?substance) as ?subVal)
     BIND(CONCAT(?year, ' <b> ',str(?result_value), '</b>', " ", ?unit_sym, " ", ?substance) as ?datedSubVal)

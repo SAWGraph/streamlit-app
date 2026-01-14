@@ -88,8 +88,9 @@ PREFIX coso: <http://w3id.org/coso/v1/contaminoso#>
 PREFIX kwg-ont: <http://stko-kwg.geog.ucsb.edu/lod/ontology/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
-SELECT (MAX(?result_value) as ?max) WHERE {{
+SELECT (MAX(?numericValue) as ?max) WHERE {{
     {region_pattern}
     ?observation rdf:type coso:ContaminantObservation ;
                 coso:observedAtSamplePoint ?sp ;
@@ -99,6 +100,11 @@ SELECT (MAX(?result_value) as ?max) WHERE {{
     ?sample coso:sampleOfMaterialType ?matType .
     ?result coso:measurementValue ?result_value ;
             coso:measurementUnit ?unit .
+    OPTIONAL {{ ?result qudt:quantityValue/qudt:numericValue ?numericResult }}
+    OPTIONAL {{ ?result qudt:enumeratedValue ?enumDetected }}
+    # Ignore enumerated non-detects when determining max range
+    FILTER(!BOUND(?enumDetected))
+    BIND(COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value)) as ?numericValue)
     VALUES ?unit {{<http://qudt.org/vocab/unit/NanoGM-PER-L>}}
     {substance_filter}
     {material_filter}
