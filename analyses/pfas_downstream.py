@@ -404,8 +404,14 @@ def main(context: AnalysisContext) -> None:
                         samples_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
                         # Format sample point links for popup
                         if 'samplePoint' in samples_gdf.columns:
+                            def _short_uri_label(uri: str) -> str:
+                                u = str(uri)
+                                if "#" in u:
+                                    return u.split("#")[-1]
+                                return u.rstrip("/").split("/")[-1]
+
                             samples_gdf['samplePoint_link'] = samples_gdf['samplePoint'].apply(
-                                lambda x: f'<a href="{x}" target="_blank">{x}</a>' if x else x
+                                lambda x: f'<a href="{x}" target="_blank">{_short_uri_label(x)}</a>' if x else x
                             )
                         # Clean up unit encoding
                         if 'unit' in samples_gdf.columns:
@@ -426,6 +432,23 @@ def main(context: AnalysisContext) -> None:
                 map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
             else:
                 map_obj = folium.Map(location=[39.8, -98.5], zoom_start=4)
+
+            # Ensure popups wrap long content instead of overflowing outside the card.
+            try:
+                popup_css = """
+<style>
+.leaflet-popup-content { max-width: 650px !important; }
+.leaflet-popup-content table { width: 100% !important; table-layout: fixed; }
+.leaflet-popup-content td, .leaflet-popup-content th {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: normal !important;
+}
+</style>
+"""
+                map_obj.get_root().header.add_child(folium.Element(popup_css))
+            except Exception:
+                pass
             
             # Add state + county boundaries (state first, then county on top)
             boundary_layers = []
@@ -513,7 +536,7 @@ def main(context: AnalysisContext) -> None:
                     marker_kwds=dict(radius=6),
                     marker_type="circle_marker",
                     popup=True,
-                    popup_kwds={"max_height": 500},
+                    popup_kwds={"max_height": 500, "max_width": 650},
                     style_kwds=dict(style_function=_sample_style),
                 )
             

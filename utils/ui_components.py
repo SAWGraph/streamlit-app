@@ -32,8 +32,23 @@ def build_naics_hierarchy(naics_dict: Dict[str, str]) -> Dict[str, Dict]:
             "code": code
         }
 
+    # 1b. Add virtual grouping nodes for combined NAICS ranges (display-only)
+    # NAICS Manufacturing is a combined sector "31–33" but represented as 31, 32, 33.
+    # We group these under a single parent so the tree doesn't show "Manufacturing" 3 times.
+    manufacturing_children = {c: nodes[c] for c in ["31", "32", "33"] if c in nodes}
+    if len(manufacturing_children) >= 2:
+        nodes["31-33"] = {
+            "name": "Manufacturing (31–33 range)",
+            "children": manufacturing_children,
+            "code": "31-33",
+            "_virtual": True,
+        }
+
     # 2. Organize into hierarchy
     for code, node in sorted(nodes.items()):
+        # Virtual grouping nodes are roots by construction
+        if node.get("_virtual"):
+            continue
         # Find longest existing ancestor
         parent_code = None
         for i in range(len(code) - 1, 1, -1):
@@ -49,6 +64,12 @@ def build_naics_hierarchy(naics_dict: Dict[str, str]) -> Dict[str, Dict]:
             # No ancestor found, add to root
             hierarchy[code] = node
 
+    # 3. Re-home manufacturing sectors under the virtual 31-33 parent (if present)
+    if "31-33" in nodes:
+        for c in ["31", "32", "33"]:
+            hierarchy.pop(c, None)
+        hierarchy["31-33"] = nodes["31-33"]
+
     return hierarchy
 
 
@@ -61,13 +82,17 @@ def convert_to_ant_tree_format(hierarchy: Dict[str, Dict]) -> List[Dict]:
     tree_data = []
 
     def process_node(code: str, data: Dict) -> Dict:
-        # Title format: "Industry Name (Code)"
-        title = f"{data['name']} ({code})"
+        # Title format: "Industry Name (Code)".
+        # For virtual grouping nodes (e.g., 31-33), show name only and make them non-selectable.
+        is_virtual = bool(data.get("_virtual")) or ("-" in code)
+        title = data["name"] if is_virtual else f"{data['name']} ({code})"
         
         node = {
             "value": code,
-            "title": title
+            "title": title,
         }
+        if is_virtual:
+            node["selectable"] = False
         children = data.get("children", {})
         if children:
             node["children"] = [

@@ -213,6 +213,11 @@ def execute_downstream_streams_query(
     Returns:
         DataFrame with columns: downstream_flowline, dsflWKT, fl_type, streamName
     """
+    # Backward-compat safety: older call sites may still pass positional args
+    # (naics_code, region_code, timeout) which would land `facility_uris` as an int.
+    if facility_uris is not None and not isinstance(facility_uris, list):
+        facility_uris = None
+
     facility_values = _build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
     region_filter = _build_region_filter(region_code)
@@ -300,6 +305,12 @@ def execute_downstream_samples_query(
     Returns:
         DataFrame with columns: samplePoint, spWKT, sample, samples, resultCount, Max, unit, results
     """
+    # Backward-compat safety: some older call sites may still pass positional args
+    # (naics_code, region_code, min_conc, max_conc, include_nondetects, timeout)
+    # which would land `facility_uris` as a number/bool. Normalize that here.
+    if facility_uris is not None and not isinstance(facility_uris, list):
+        facility_uris = None
+
     facility_values = _build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
     region_filter = _build_region_filter(region_code)

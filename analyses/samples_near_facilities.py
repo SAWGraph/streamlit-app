@@ -71,22 +71,8 @@ def main(context: AnalysisContext) -> None:
         # DETECTED CONCENTRATION
         st.markdown("### 📊 Detected Concentration")
 
-        # Include nondetects option
-        # Use a "pending" key so toggling doesn't affect the applied value until Execute is clicked.
-        include_nondetects_key = f"{analysis_key}_include_nondetects"
-        include_nondetects_pending_key = f"{analysis_key}_include_nondetects_pending"
-        if include_nondetects_key not in st.session_state:
-            st.session_state[include_nondetects_key] = False
-        if include_nondetects_pending_key not in st.session_state:
-            st.session_state[include_nondetects_pending_key] = st.session_state[include_nondetects_key]
-
-        include_nondetects = st.checkbox(
-            "Include nondetects",
-            value=st.session_state[include_nondetects_pending_key],
-            key=f"{analysis_key}_nondetects_checkbox_pending",
-            help="Include observations with zero concentration or nondetect flags"
-        )
-        st.session_state[include_nondetects_pending_key] = include_nondetects
+        # Temporarily disable nondetect toggle for Nearby (performance).
+        include_nondetects = False
 
         max_limit = 500
 
@@ -150,9 +136,8 @@ def main(context: AnalysisContext) -> None:
 
     # Execute the query when form is submitted
     if execute_button:
-        # Apply pending nondetect selection only on submit
-        st.session_state[include_nondetects_key] = st.session_state.get(include_nondetects_pending_key, False)
-        include_nondetects = st.session_state[include_nondetects_key]
+        # Nondetects temporarily disabled for Nearby
+        include_nondetects = False
         region_boundary_df = None
         state_boundary_df = None
         county_boundary_df = None
@@ -228,6 +213,23 @@ def main(context: AnalysisContext) -> None:
                         
                         # Create map
                         map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+
+                        # Ensure popups wrap long content instead of overflowing outside the card.
+                        try:
+                            popup_css = """
+<style>
+.leaflet-popup-content { max-width: 650px !important; }
+.leaflet-popup-content table { width: 100% !important; table-layout: auto; }
+.leaflet-popup-content td, .leaflet-popup-content th {
+  word-break: normal;
+  overflow-wrap: break-word;
+  white-space: normal !important;
+}
+</style>
+"""
+                            map_obj.get_root().header.add_child(folium.Element(popup_css))
+                        except Exception:
+                            pass
                         
                         # Add state + county boundaries (state first, then county on top)
                         query_region_code = st.session_state.get(region_code_key)
@@ -264,13 +266,37 @@ def main(context: AnalysisContext) -> None:
                                 },
                             ).add_to(map_obj)
                         
-                        # Add facilities (blue markers)
+                        # Add facilities (blue markers) - ensure popup has the full info (same as hover)
+                        if "facility" in facilities_gdf.columns:
+                            facilities_gdf["facility_link"] = facilities_gdf["facility"].apply(
+                                lambda x: (
+                                    f'<a href="https://frs-public.epa.gov/ords/frs_public2/fii_query_detail.disp_program_facility?p_registry_id={x.split(".")[-1]}" target="_blank">FRS {x.split(".")[-1]}</a>'
+                                    if x
+                                    else x
+                                )
+                            )
+
+                        # Shorten NAICS URI for display (avoids long URLs in the popup)
+                        if "industryCode" in facilities_gdf.columns:
+                            facilities_gdf["industryCode_short"] = facilities_gdf["industryCode"].apply(
+                                lambda x: str(x).split("#")[-1] if x else x
+                            )
+
+                        facility_popup_fields = [
+                            c
+                            for c in ["facility_link", "facilityName", "industryName", "industryCode_short"]
+                            if c in facilities_gdf.columns
+                        ]
+
                         facilities_gdf.explore(
                             m=map_obj,
                             name=f'<span style="color:Blue;">🏭 {industry_display} ({len(facilities_gdf)})</span>',
                             color='Blue',
                             marker_kwds=dict(radius=8),
-                            popup=['facilityName', 'industryName'] if 'facilityName' in facilities_gdf.columns else True,
+                            popup=facility_popup_fields if facility_popup_fields else True,
+                            tooltip=facility_popup_fields if facility_popup_fields else True,
+                            popup_kwds={"max_width": 650, "parse_html": True},
+                            tooltip_kwds={"sticky": True, "parse_html": True},
                             show=True
                         )
                         

@@ -420,23 +420,40 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     # =========================================================================
     
     # Build concentration filter.
-    # Desired behavior:
-    # - include_nondetects=False: only keep detected numeric results within [min,max]
-    # - include_nondetects=True: keep (detected numeric within [min,max]) OR (non-detect flagged)
-    concentration_filter = ""
+    # NOTE: Nondetect handling is expensive in the federated query; when include_nondetects=False
+    # we omit the non-detect machinery entirely for performance.
     if include_nondetects:
         concentration_filter = (
             f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_concentration} && ?numericValue <= {max_concentration}) )"
         )
+        nondetect_fragment = """
+    OPTIONAL { ?result qudt:enumeratedValue ?enumDetected }
+    # Non-detect detection: enumeratedValue OR explicit "non-detect" value (string/URI)
+    BIND(
+      (BOUND(?enumDetected) || LCASE(STR(?result_value)) = "non-detect" || STR(?result_value) = STR(coso:non-detect))
+      as ?isNonDetect
+    )
+    # Numeric value for detected results; for non-detects force numericValue=0.
+    BIND(
+      IF(
+        ?isNonDetect,
+        0,
+        COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
+      ) as ?numericValue
+    )
+"""
     else:
         concentration_filter = "\n".join(
             [
-                "FILTER(!?isNonDetect)",
                 "FILTER(BOUND(?numericValue))",
                 "FILTER(?numericValue > 0)",
                 f"FILTER (?numericValue >= {min_concentration} && ?numericValue <= {max_concentration})",
             ]
         )
+        nondetect_fragment = """
+    # Detected-only fast path: numericValue derived from numericResult/result_value, no non-detect handling
+    BIND(COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value)) as ?numericValue)
+"""
     
     samples_query = f"""
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
@@ -491,22 +508,7 @@ WHERE {{
     ?result coso:measurementValue ?result_value;
             coso:measurementUnit ?unit.
     OPTIONAL {{ ?result qudt:quantityValue/qudt:numericValue ?numericResult }}
-    OPTIONAL {{ ?result qudt:enumeratedValue ?enumDetected }}
-    # Non-detect detection: enumeratedValue OR explicit "non-detect" value (string/URI)
-    BIND(
-      (BOUND(?enumDetected) || LCASE(STR(?result_value)) = "non-detect" || STR(?result_value) = STR(coso:non-detect))
-      as ?isNonDetect
-    )
-    # Numeric value for detected results (best-effort). For non-detects, numericValue is 0 (but we still keep them via ?isNonDetect).
-    # IMPORTANT: if this is a non-detect row, force numericValue=0 even if numericResult exists
-    # (numericResult can sometimes represent detection limit / other non-detect quantities).
-    BIND(
-      IF(
-        ?isNonDetect,
-        0,
-        COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
-      ) as ?numericValue
-    )
+    {nondetect_fragment}
     ?substance1 rdfs:label ?substance.
     ?unit qudt:symbol ?unit_sym.
     {concentration_filter}
