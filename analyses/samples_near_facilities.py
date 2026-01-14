@@ -272,11 +272,16 @@ def main(context: AnalysisContext) -> None:
                         try:
                             popup_css = """
 <style>
-.leaflet-popup-content { max-width: 650px !important; }
+.leaflet-popup-content { min-width: 420px !important; max-width: 900px !important; width: auto !important; }
 .leaflet-popup-content table { width: 100% !important; table-layout: auto; }
 .leaflet-popup-content td, .leaflet-popup-content th {
   word-break: normal;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+  white-space: normal !important;
+}
+/* Ensure long URLs wrap instead of overflowing */
+.leaflet-popup-content a {
+  overflow-wrap: anywhere;
   white-space: normal !important;
 }
 </style>

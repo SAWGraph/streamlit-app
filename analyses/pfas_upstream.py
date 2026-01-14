@@ -673,6 +673,26 @@ def main(context: AnalysisContext) -> None:
                 else:
                     # Default to US center
                     map_obj = folium.Map(location=[39.8, -98.5], zoom_start=4)
+
+                # Ensure popups wrap long content instead of overflowing outside the card.
+                try:
+                    popup_css = """
+<style>
+.leaflet-popup-content { min-width: 420px !important; max-width: 900px !important; width: auto !important; }
+.leaflet-popup-content table { width: 100% !important; table-layout: auto; }
+.leaflet-popup-content td, .leaflet-popup-content th {
+  overflow-wrap: anywhere;
+  white-space: normal !important;
+}
+.leaflet-popup-content a {
+  overflow-wrap: anywhere;
+  white-space: normal !important;
+}
+</style>
+"""
+                    map_obj.get_root().header.add_child(folium.Element(popup_css))
+                except Exception:
+                    pass
             
                 # Add state + county boundaries if available (state first, then county on top)
                 boundary_layers = []
@@ -723,14 +743,25 @@ def main(context: AnalysisContext) -> None:
             
                 # Add contaminated samples (orange markers)
                 if samples_gdf is not None and not samples_gdf.empty:
+                    sample_fields = [
+                        c
+                        for c in ["sp", "result_value", "substance", "matType", "regionURI"]
+                        if c in samples_gdf.columns
+                    ]
+                    if not sample_fields:
+                        # Fallback to whatever we have historically used
+                        sample_fields = (
+                            ['sp', 'result_value'] if all(col in samples_gdf.columns for col in ['sp', 'result_value'])
+                            else (['sp', 'max'] if all(col in samples_gdf.columns for col in ['sp', 'max']) else [])
+                        )
                     samples_gdf.explore(
                         m=map_obj,
                         name='<span style="color:DarkOrange;">🔬 Contaminated Samples</span>',
                         color='DarkOrange',
                         marker_kwds=dict(radius=8),
                         marker_type='circle_marker',
-                        popup=['sp', 'result_value'] if all(col in samples_gdf.columns for col in ['sp', 'result_value']) else (['sp', 'max'] if all(col in samples_gdf.columns for col in ['sp', 'max']) else True),
-                        tooltip=['result_value'] if 'result_value' in samples_gdf.columns else (['max'] if 'max' in samples_gdf.columns else None),
+                        popup=sample_fields if sample_fields else True,
+                        tooltip=sample_fields if sample_fields else None,
                         style_kwds=dict(
                             fillOpacity=0.7,
                             opacity=0.8
@@ -766,13 +797,24 @@ def main(context: AnalysisContext) -> None:
                             color = colors[idx % len(colors)]
                             layer_name = f'🏭 {group} ({count})'
                             
+                            facility_fields = [
+                                c
+                                for c in [
+                                    "facilityName",
+                                    "industryName",
+                                    "industryCode",
+                                    "facWKT",
+                                    "facility",
+                                ]
+                                if c in group_facilities.columns
+                            ]
                             group_facilities.explore(
                                 m=map_obj,
                                 name=f'<span style="color:{color};">{layer_name}</span>',
                                 color=color,
                                 marker_kwds=dict(radius=6),
-                                popup=['facilityName', 'industryName'] if all(col in group_facilities.columns for col in ['facilityName', 'industryName']) else True,
-                                tooltip=['facilityName', 'industryName'] if 'facilityName' in group_facilities.columns else None,
+                                popup=facility_fields if facility_fields else True,
+                                tooltip=facility_fields if facility_fields else None,
                             show=True
                         )
             

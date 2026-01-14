@@ -473,10 +473,14 @@ def main(context: AnalysisContext) -> None:
             try:
                 popup_css = """
 <style>
-.leaflet-popup-content { max-width: 650px !important; }
-.leaflet-popup-content table { width: 100% !important; table-layout: fixed; }
+.leaflet-popup-content { min-width: 420px !important; max-width: 900px !important; width: auto !important; }
+.leaflet-popup-content table { width: 100% !important; table-layout: auto; }
 .leaflet-popup-content td, .leaflet-popup-content th {
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: normal !important;
+}
+/* Ensure long URLs wrap instead of overflowing */
+.leaflet-popup-content a {
   overflow-wrap: anywhere;
   white-space: normal !important;
 }
@@ -611,7 +615,8 @@ def main(context: AnalysisContext) -> None:
                             name=f'<span style="color:{c};">{industry}</span>',
                             color=c,
                             marker_kwds=dict(radius=3),
-                            popup=[x for x in ["facility_link", "facilityName", "industryName"] if x in facilities_gdf.columns],
+                            # Ensure click popup shows the same rich set of fields as hover (geopandas default)
+                            popup=True,
                         )
                 else:
                     facilities_gdf.explore(
@@ -619,7 +624,8 @@ def main(context: AnalysisContext) -> None:
                         name=f'<span style="color:Purple;">Facilities</span>',
                         color="Purple",
                         marker_kwds=dict(radius=3),
-                        popup=[x for x in ["facility_link", "facilityName"] if x in facilities_gdf.columns] or True,
+                        # Ensure click popup shows the same rich set of fields as hover (geopandas default)
+                        popup=True,
                     )
             
             # Hide legend by default (consistent with other analyses in the app)

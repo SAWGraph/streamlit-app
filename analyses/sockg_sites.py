@@ -129,6 +129,26 @@ def main(context: AnalysisContext) -> None:
         else:
             map_obj = folium.Map(location=[39.8, -98.5], zoom_start=4)
 
+        # Ensure popups/tooltips wrap long URLs instead of overflowing outside the card.
+        try:
+            popup_css = """
+<style>
+.leaflet-popup-content { min-width: 420px !important; max-width: 900px !important; width: auto !important; }
+.leaflet-popup-content table { width: 100% !important; table-layout: auto; }
+.leaflet-popup-content td, .leaflet-popup-content th {
+  overflow-wrap: anywhere;
+  white-space: normal !important;
+}
+.leaflet-popup-content a, .leaflet-tooltip a {
+  overflow-wrap: anywhere;
+  white-space: normal !important;
+}
+</style>
+"""
+            map_obj.get_root().header.add_child(folium.Element(popup_css))
+        except Exception:
+            pass
+
         if sites_gdf is not None and not sites_gdf.empty:
             sites_points = sites_gdf.copy()
             sites_points["geometry"] = sites_points.geometry.centroid
