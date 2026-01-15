@@ -130,6 +130,10 @@ def render_hierarchical_naics_selector(
             # Important: avoid checkbox-style selection unless explicitly requested.
             # Some st_ant_tree versions don't support all kwargs (e.g., treeCheckStrictly).
             # We progressively fall back to a smaller kwarg set to stay compatible.
+            #
+            # Key insight: st_ant_tree defaults to checkbox multi-select behavior.
+            # To get TRUE single-select, we must explicitly pass:
+            #   multiple=False, treeCheckable=False
             kwargs = dict(
                 treeData=tree_data,
                 placeholder="Select Industry Type...",
@@ -138,8 +142,12 @@ def render_hierarchical_naics_selector(
                 treeLine=True,
                 defaultValue=default_val,
                 key=key,
+                # Force single-select mode explicitly
+                multiple=False,
+                treeCheckable=False,
             )
             if multi_select:
+                # Override to multi-select mode
                 kwargs.update(
                     dict(
                         multiple=True,
@@ -152,17 +160,20 @@ def render_hierarchical_naics_selector(
             try:
                 selected = st_ant_tree(**kwargs)
             except TypeError:
-                # Retry without newer kwargs
-                for bad in ("treeCheckStrictly", "treeCheckable", "multiple"):
-                    if bad in kwargs:
-                        kwargs.pop(bad, None)
-                        try:
-                            selected = st_ant_tree(**kwargs)
-                            break
-                        except TypeError:
-                            continue
-                else:
-                    raise
+                # Retry without newer kwargs (progressively remove problematic ones)
+                problematic = ["treeCheckStrictly", "treeCheckable", "multiple"]
+                for bad in problematic:
+                    kwargs.pop(bad, None)
+                try:
+                    selected = st_ant_tree(**kwargs)
+                except TypeError:
+                    # Last resort: minimal kwargs
+                    selected = st_ant_tree(
+                        treeData=tree_data,
+                        placeholder="Select Industry Type...",
+                        allowClear=True,
+                        key=key,
+                    )
 
         # Return selected code
         if selected and len(selected) > 0:
