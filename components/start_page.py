@@ -14,9 +14,7 @@ def render_start_page(project_dir: str):
     """
     # Try to load logo - check multiple possible locations and filenames
     possible_logo_paths = [
-        os.path.join(project_dir, "assets", "Sawgraph-Logo-transparent.png"),
-        os.path.join(project_dir, "assets", "sawgraph_logo.png"),
-        os.path.join(project_dir, "assets", "logo.png"),
+        os.path.join(project_dir, "assets", "Sawgraph-Logo-transparent.png")
     ]
     
     logo_path = None
@@ -34,9 +32,7 @@ def render_start_page(project_dir: str):
         # Display logo if it exists, otherwise show placeholder
         # Logo displayed on white background as requested
         if logo_path:
-            st.markdown("""
-            <div style='background-color: white; padding: 20px; border-radius: 10px; text-align: center;'>
-            """, unsafe_allow_html=True)
+            st.markdown("<div style='padding: 0px; text-align: center;'>", unsafe_allow_html=True)
             st.image(logo_path, use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
         else:
@@ -47,12 +43,11 @@ def render_start_page(project_dir: str):
         # Project description
         st.markdown("""
         <div style='text-align: center; padding: 20px;'>
-            <h2>Welcome to SAWGraph PFAS Explorer</h2>
+            <h2>Welcome to SAWGraph's PFAS Analysis Explorer</h2>
             <p style='font-size: 1.1em; line-height: 1.6;'>
                 This app is developed as part of the project 
                 <strong>"Safe Agricultural Products and Water Graph (SAWGraph): 
-                An Open Knowledge Network to Monitor and Trace PFAS and Other Contaminants 
-                in the Nation's Food and Water Systems"</strong>.
+                An Open Knowledge Network to Monitor and Trace PFAS and Other Contaminants in the Nation's Food and Water Systems"</strong>.
             </p>
             <p style='font-size: 1em; margin-top: 20px;'>
                 <a href='https://sawgraph.github.io' target='_blank' style='color: #1f77b4; text-decoration: none;'>
@@ -68,15 +63,15 @@ def render_start_page(project_dir: str):
         st.markdown("""
         ### Getting Started
         
-        1. **Select an Analysis Type** from the sidebar to begin
-        2. **Choose a Geographic Region** (State → County → Subdivision)
-        3. **Configure Analysis Parameters** as needed
-        4. **Execute the Query** to view results
+        1. In the sidebar, select an analysis type
+        2. Narrow down to the admininstrative region of interest (State → County → County Subdivision)
+        3. Add analysis-specific parameters as desired
+        4. Execute the query
         
         Available analyses include:
-        - 🌊 **PFAS Upstream Tracing**: Trace potential contamination sources upstream
-        - ⬇️ **PFAS Downstream Tracing**: Explore downstream transport and impacts
-        - 🏭 **Samples Near Facilities**: Find contaminated samples near industrial facilities
+        - 🏭 **Samples Near Facilities**: Find PFAS test results near facilities of specific industries
+        - ⬇️ **PFAS Downstream Tracing**: Expand to look also for PFAS test results downstream from facilities to examine contaminant transport
+        - 🌊 **PFAS Upstream Tracing**: Start at sample results (of specific substances and/or specific levels) and find industrial facilities upstream thereof
         """)
         
         st.markdown("<br>", unsafe_allow_html=True)
