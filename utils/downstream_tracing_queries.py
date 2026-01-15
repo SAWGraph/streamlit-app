@@ -4,9 +4,9 @@ PFAS Downstream Tracing Query Functions
 
 Implements a 3-step pipeline matching the notebook approach:
 
-    Step 1: Find facilities by NAICS industry type in a region (federation)
-    Step 2: Find downstream flowlines/streams from facility locations (federation)
-    Step 3: Find contaminated samples in downstream S2 cells (federation)
+    Step 1: Find facilities by NAICS industry type in a region 
+    Step 2: Find downstream flowlines/streams originating from the facilities' locations
+    Step 3: Find samplepoints in downstream S2 cells
 
 This module traces contamination DOWNSTREAM from facilities of specific industry types.
 """
@@ -102,18 +102,11 @@ def _build_region_filter(region_code: Optional[str], county_var: str = "?county"
         return ""
     
     code = str(region_code).strip()
-    if len(code) <= 2:
+    # if either a 2-digit or 5-digit region code is provided, we can simply query using the following format
+    if len(code) <= 5:
         # State code (e.g., "18" for Indiana)
         return f"""{county_var} rdf:type kwg-ont:AdministrativeRegion_2 ;
                    kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."""
-    elif len(code) == 5:
-        # County FIPS code (e.g., "23019") - restrict to the selected county
-        return "\n".join(
-            [
-                f"VALUES {county_var} {{ kwgr:administrativeRegion.USA.{code} }} .",
-                f"{county_var} rdf:type kwg-ont:AdministrativeRegion_2 .",
-            ]
-        )
     else:
         # More specific region - not supported in this query style
         return ""
