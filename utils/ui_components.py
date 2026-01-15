@@ -176,9 +176,21 @@ def render_hierarchical_naics_selector(
                     )
 
         # Return selected code
-        if selected and len(selected) > 0:
-            return selected if multi_select else selected[0]
-        elif default_value:
+        # Handle both list and string returns from st_ant_tree
+        if selected:
+            if isinstance(selected, list):
+                if len(selected) > 0:
+                    return selected if multi_select else selected[0]
+            elif isinstance(selected, str):
+                # Component returned a string directly (single-select mode)
+                return [selected] if multi_select else selected
+            elif isinstance(selected, (int, float)):
+                # Component returned a number
+                code = str(int(selected))
+                return [code] if multi_select else code
+        
+        # No selection - return default or empty
+        if default_value:
             return [default_value] if multi_select else default_value
         elif allow_empty:
             return [] if multi_select else ""
