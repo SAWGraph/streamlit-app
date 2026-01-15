@@ -184,13 +184,11 @@ def main(context: AnalysisContext) -> None:
     has_state = bool(context.selected_state_code)
     has_county = bool(context.selected_county_code)
     has_industry = bool(selected_naics_code)
-    can_execute = has_state and has_county and has_industry
+    can_execute = has_state and has_industry
 
     missing = []
     if not has_state:
         missing.append("state")
-    if not has_county:
-        missing.append("county")
     if not has_industry:
         missing.append("industry")
 
@@ -215,8 +213,6 @@ def main(context: AnalysisContext) -> None:
         missing_fields = []
         if not context.selected_state_code:
             missing_fields.append("state")
-        if not context.selected_county_code:
-            missing_fields.append("county")
         if not selected_naics_code:
             missing_fields.append("industry type")
         
