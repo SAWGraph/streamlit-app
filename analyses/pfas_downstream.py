@@ -180,7 +180,7 @@ def main(context: AnalysisContext) -> None:
     st.sidebar.markdown(f"**Selected range:** {min_concentration} - {max_concentration} ng/L")
     st.sidebar.markdown("---")
 
-    # Execute button - state, county, and industry are all required
+    # Execute button - state and industry are required; county is optional
     has_state = bool(context.selected_state_code)
     has_county = bool(context.selected_county_code)
     has_industry = bool(selected_naics_code)

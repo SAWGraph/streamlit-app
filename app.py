@@ -115,7 +115,8 @@ def main() -> None:
     st.sidebar.markdown("---")
 
     selected_key = label_to_key.get(analysis_label)
-    region_required = selected_key in {"upstream", "downstream"}
+    # Only Upstream requires county selection; Downstream county is optional.
+    region_required = selected_key in {"upstream"}
 
     if selected_key == "sockg_sites":
         region = _render_sockg_state_only_selector(states_df)
