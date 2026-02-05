@@ -13,7 +13,7 @@ from streamlit_folium import st_folium
 
 from analysis_registry import AnalysisContext
 from analyses.sockg_sites.queries import get_sockg_locations, get_sockg_facilities
-from filters.region import get_region_boundary
+from filters.region import get_region_boundary, add_region_boundary_layers
 
 
 def main(context: AnalysisContext) -> None:
@@ -22,6 +22,8 @@ def main(context: AnalysisContext) -> None:
     **What this analysis does:**
     - Retrieves SOCKG locations (ARS sites)
     - Finds nearby facilities and flags PFAS-related industries
+
+    **2-Step Process:** Retrieve SOCKG locations → Find nearby facilities
 
     **State filter:** Optional (use the region selector in the sidebar)
     """)
@@ -44,11 +46,33 @@ def main(context: AnalysisContext) -> None:
 
     if execute:
         region_boundary_df = None
-        with st.spinner("Running SOCKG queries..."):
-            sites_df = get_sockg_locations(state_code)
-            facilities_df = get_sockg_facilities(state_code)
-            if state_code:
-                region_boundary_df = get_region_boundary(state_code)
+        st.markdown("---")
+        st.subheader("🚀 Query Execution")
+        prog_col1, prog_col2 = st.columns(2)
+
+        with prog_col1:
+            with st.spinner("🔄 Step 1: Retrieving SOCKG locations..."):
+                sites_df = get_sockg_locations(state_code)
+            if not sites_df.empty:
+                st.success(f"✅ Step 1: Found {len(sites_df)} locations")
+            else:
+                st.info("ℹ️ Step 1: No SOCKG locations found")
+
+        with prog_col2:
+            with st.spinner("🔄 Step 2: Finding nearby facilities..."):
+                facilities_df = get_sockg_facilities(state_code)
+            if not facilities_df.empty:
+                st.success(f"✅ Step 2: Found {len(facilities_df)} facilities")
+            else:
+                st.info("ℹ️ Step 2: No facilities found")
+
+        if state_code:
+            region_boundary_df = get_region_boundary(state_code)
+
+        params_data = [
+            {"Parameter": "State filter", "Value": state_display},
+        ]
+        params_df = pd.DataFrame(params_data)
 
         st.session_state[f"{context.analysis_key}_results"] = {
             "sites_df": sites_df,
@@ -56,6 +80,7 @@ def main(context: AnalysisContext) -> None:
             "state_display": state_display,
             "state_code": state_code,
             "region_boundary_df": region_boundary_df,
+            "params_df": params_df,
         }
         st.session_state[f"{context.analysis_key}_has_results"] = True
 
@@ -67,55 +92,106 @@ def main(context: AnalysisContext) -> None:
     sites_df = results.get("sites_df", pd.DataFrame())
     facilities_df = results.get("facilities_df", pd.DataFrame())
     state_label = results.get("state_display") or "All states"
+    state_code = results.get("state_code")
     region_boundary_df = results.get("region_boundary_df")
+    params_df = results.get("params_df")
 
     st.markdown("---")
-    st.markdown("### 📊 Results")
-    st.caption(f"State filter used: {state_label}")
+    if params_df is not None and not params_df.empty:
+        st.markdown("### 📋 Selected Parameters (from executed query)")
+        st.table(params_df)
+    st.markdown("### 🔬 Query Results")
 
     pfas_count = 0
     if not facilities_df.empty and "PFASusing" in facilities_df.columns:
         pfas_count = facilities_df["PFASusing"].astype(str).str.lower().eq("true").sum()
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("📍 SOCKG Locations", len(sites_df))
-    with col2:
-        st.metric("🏭 Facilities", len(facilities_df))
-    with col3:
-        st.metric("⚠️ PFAS-Related Facilities", pfas_count)
-
     if sites_df.empty and facilities_df.empty:
         st.warning("No results found. Try again or remove the state filter.")
         return
 
-    tab1, tab2, tab3 = st.tabs(["🗺️ Map", "📍 Locations", "🏭 Facilities"])
+    st.markdown("---")
 
-    with tab1:
-        sites_gdf = None
-        facilities_gdf = None
+    # Step 1: SOCKG Locations
+    if not sites_df.empty:
+        st.markdown("### 📍 Step 1: SOCKG Locations")
+        
+        st.metric("Total Locations", len(sites_df))
+        
+        with st.expander("📊 View SOCKG Locations Data"):
+            display_cols = [
+                c for c in ["locationId", "locationDescription", "location"] if c in sites_df.columns
+            ]
+            st.dataframe(sites_df[display_cols] if display_cols else sites_df, use_container_width=True)
+            
+            csv_sites = sites_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Locations CSV",
+                data=csv_sites,
+                file_name=f"sockg_locations_{state_code or 'all'}.csv",
+                mime="text/csv",
+                key=f"download_{context.analysis_key}_locations"
+            )
 
-        if not sites_df.empty and "locationGeometry" in sites_df.columns:
-            sites_with_wkt = sites_df[sites_df["locationGeometry"].notna()].copy()
-            if not sites_with_wkt.empty:
-                sites_with_wkt["geometry"] = sites_with_wkt["locationGeometry"].apply(wkt.loads)
-                sites_gdf = gpd.GeoDataFrame(sites_with_wkt, geometry="geometry")
-                sites_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+    # Step 2: Facilities
+    if not facilities_df.empty:
+        st.markdown("### 🏭 Step 2: Facilities")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Facilities", len(facilities_df))
+        with col2:
+            st.metric("⚠️ PFAS-Related Facilities", pfas_count)
+        
+        with st.expander("📊 View Facilities Data"):
+            display_cols = [
+                c
+                for c in [
+                    "facilityName",
+                    "industrySector",
+                    "industrySubsector",
+                    "PFASusing",
+                    "industries",
+                    "locations",
+                ]
+                if c in facilities_df.columns
+            ]
+            st.dataframe(facilities_df[display_cols] if display_cols else facilities_df, use_container_width=True)
+            
+            csv_facilities = facilities_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Facilities CSV",
+                data=csv_facilities,
+                file_name=f"sockg_facilities_{state_code or 'all'}.csv",
+                mime="text/csv",
+                key=f"download_{context.analysis_key}_facilities"
+            )
 
-        if not facilities_df.empty and "facWKT" in facilities_df.columns:
-            fac_with_wkt = facilities_df[facilities_df["facWKT"].notna()].copy()
-            if not fac_with_wkt.empty:
-                fac_with_wkt["PFASusing"] = (
-                    fac_with_wkt["PFASusing"].astype(str).str.lower() == "true"
-                )
-                fac_with_wkt["geometry"] = fac_with_wkt["facWKT"].apply(wkt.loads)
-                facilities_gdf = gpd.GeoDataFrame(fac_with_wkt, geometry="geometry")
-                facilities_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+    # Map section
+    sites_gdf = None
+    facilities_gdf = None
 
-        if sites_gdf is None and facilities_gdf is None:
-            st.info("No spatial data available to render the map.")
-            return
+    if not sites_df.empty and "locationGeometry" in sites_df.columns:
+        sites_with_wkt = sites_df[sites_df["locationGeometry"].notna()].copy()
+        if not sites_with_wkt.empty:
+            sites_with_wkt["geometry"] = sites_with_wkt["locationGeometry"].apply(wkt.loads)
+            sites_gdf = gpd.GeoDataFrame(sites_with_wkt, geometry="geometry")
+            sites_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
 
+    if not facilities_df.empty and "facWKT" in facilities_df.columns:
+        fac_with_wkt = facilities_df[facilities_df["facWKT"].notna()].copy()
+        if not fac_with_wkt.empty:
+            fac_with_wkt["PFASusing"] = (
+                fac_with_wkt["PFASusing"].astype(str).str.lower() == "true"
+            )
+            fac_with_wkt["geometry"] = fac_with_wkt["facWKT"].apply(wkt.loads)
+            facilities_gdf = gpd.GeoDataFrame(fac_with_wkt, geometry="geometry")
+            facilities_gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+
+    if sites_gdf is not None or facilities_gdf is not None:
+        st.markdown("---")
+        st.markdown("### 🗺️ Interactive Map")
+        
         if sites_gdf is not None and not sites_gdf.empty:
             centroids = sites_gdf.geometry.centroid
             center_lat = centroids.y.mean()
@@ -273,52 +349,11 @@ def main(context: AnalysisContext) -> None:
                     show=True,
                 )
 
-        if region_boundary_df is not None and not region_boundary_df.empty:
-            # `get_region_boundary` returns columns named countyWKT/countyName even for states.
-            boundary_wkt = region_boundary_df.iloc[0]["countyWKT"]
-            boundary_name = region_boundary_df.iloc[0].get("countyName", "State")
-            boundary_gdf = gpd.GeoDataFrame(
-                index=[0],
-                crs="EPSG:4326",
-                geometry=[wkt.loads(boundary_wkt)]
-            )
-            folium.GeoJson(
-                boundary_gdf.to_json(),
-                name=f'<span style="color:#444444;">📍 {boundary_name} Boundary</span>',
-                style_function=lambda x: {
-                    "fillColor": "#ffffff00",
-                    "color": "#444444",
-                    "weight": 3,
-                    "fillOpacity": 0.0,
-                },
-            ).add_to(map_obj)
+        add_region_boundary_layers(
+            map_obj,
+            region_boundary_df=region_boundary_df,
+            region_code=state_code,
+        )
 
         folium.LayerControl(collapsed=True).add_to(map_obj)
         st_folium(map_obj, width=None, height=600, returned_objects=[])
-
-    with tab2:
-        if sites_df.empty:
-            st.info("No SOCKG locations found for the selected state.")
-        else:
-            display_cols = [
-                c for c in ["locationId", "locationDescription", "location"] if c in sites_df.columns
-            ]
-            st.dataframe(sites_df[display_cols] if display_cols else sites_df, use_container_width=True)
-
-    with tab3:
-        if facilities_df.empty:
-            st.info("No facilities found for the selected state.")
-        else:
-            display_cols = [
-                c
-                for c in [
-                    "facilityName",
-                    "industrySector",
-                    "industrySubsector",
-                    "PFASusing",
-                    "industries",
-                    "locations",
-                ]
-                if c in facilities_df.columns
-            ]
-            st.dataframe(facilities_df[display_cols] if display_cols else facilities_df, use_container_width=True)

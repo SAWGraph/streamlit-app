@@ -6,7 +6,7 @@ Includes availability queries and UI components.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple
+from typing import Callable, Literal, Optional, Tuple
 import streamlit as st
 import pandas as pd
 import requests
@@ -274,6 +274,90 @@ SELECT * WHERE {{
         return None
 
 
+def add_region_boundary_layers(
+    map_obj,
+    *,
+    state_boundary_df: Optional[pd.DataFrame] = None,
+    county_boundary_df: Optional[pd.DataFrame] = None,
+    region_boundary_df: Optional[pd.DataFrame] = None,
+    region_code: Optional[str] = None,
+    state_color: str = "#000000",
+    county_color: str = "#666666",
+    weight: int = 3,
+    warn_fn: Optional[Callable[[str], None]] = None,
+) -> None:
+    """
+    Add state/county/region boundary layers to a Folium map with consistent styling.
+
+    Boundaries are added in this order: state, then county. If neither is provided,
+    a single region boundary is added as a fallback (label inferred from region_code).
+    """
+    if map_obj is None:
+        return
+
+    layers: list[tuple[str, pd.DataFrame, str]] = []
+    if state_boundary_df is not None and not state_boundary_df.empty:
+        layers.append(("State", state_boundary_df, state_color))
+    if county_boundary_df is not None and not county_boundary_df.empty:
+        layers.append(("County", county_boundary_df, county_color))
+
+    if not layers and region_boundary_df is not None and not region_boundary_df.empty:
+        label = "Region"
+        color = state_color
+        if region_code:
+            code = str(region_code).strip()
+            if len(code) > 5:
+                label = "Subdivision"
+                color = county_color
+            elif len(code) == 5:
+                label = "County"
+                color = county_color
+            elif len(code) >= 2:
+                label = "State"
+                color = state_color
+        layers.append((label, region_boundary_df, color))
+
+    if not layers:
+        return
+
+    def _warn(message: str) -> None:
+        if warn_fn:
+            warn_fn(message)
+        else:
+            print(message)
+
+    try:
+        import folium
+        from shapely import wkt as shapely_wkt
+        from shapely.geometry import mapping
+    except Exception as exc:
+        _warn(f"Boundary styling unavailable: {exc}")
+        return
+
+    for region_type, bdf, color in layers:
+        try:
+            boundary_wkt = bdf.iloc[0]["countyWKT"]
+            boundary_name = bdf.iloc[0].get("countyName", region_type)
+            boundary_geom = shapely_wkt.loads(boundary_wkt)
+            feature = {
+                "type": "Feature",
+                "properties": {"name": boundary_name},
+                "geometry": mapping(boundary_geom),
+            }
+            folium.GeoJson(
+                feature,
+                name=f'<span style="color:{color};">📍 {region_type}: {boundary_name}</span>',
+                style_function=lambda _x, c=color: {
+                    "fillColor": "#ffffff00",
+                    "color": c,
+                    "weight": weight,
+                    "fillOpacity": 0.0,
+                },
+            ).add_to(map_obj)
+        except Exception as e:
+            _warn(f"Could not display {region_type.lower()} boundary: {e}")
+
+
 # =============================================================================
 # CACHED AVAILABILITY FUNCTIONS
 # =============================================================================
@@ -414,7 +498,8 @@ def render_region_selector(
 
         if not state_counties.empty:
             available_county_codes = get_available_county_codes(selection.state_code)
-            county_options = ["-- Select a County --"]
+            available_county_options = []
+            unavailable_county_options = []
             county_name_map = {}
 
             for _, row in state_counties.sort_values('county_name').iterrows():
@@ -422,10 +507,18 @@ def render_region_selector(
                 county_code = str(row['county_code']).zfill(5)
                 if county_code in available_county_codes:
                     display_name = f"✓ {county_name}"
+                    available_county_options.append(display_name)
                 else:
                     display_name = f"✗ {county_name}"
-                county_options.append(display_name)
+                    unavailable_county_options.append(display_name)
                 county_name_map[display_name] = county_name
+
+            # Valid choices first (✓), then invalid (✗), alphabetically within each group.
+            county_options = (
+                ["-- Select a County --"]
+                + available_county_options
+                + unavailable_county_options
+            )
 
             def on_county_change():
                 selected = st.session_state.county_selector
