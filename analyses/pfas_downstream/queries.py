@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 
 from core.sparql import ENDPOINT_URLS, parse_sparql_results
+from core.naics_utils import normalize_naics_codes, build_simple_naics_values
 
 
 def _post_sparql(endpoint: str, query: str, timeout: int) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
@@ -41,13 +42,21 @@ def _post_sparql(endpoint: str, query: str, timeout: int) -> Tuple[Optional[dict
 
 
 def _build_industry_filter(naics_code: Optional[str]) -> str:
-    if not naics_code:
+    """
+    Build a NAICS VALUES clause for downstream queries.
+
+    Behavior:
+      - If no code is provided, return empty string.
+      - If code length > 4, constrain ?industryCode
+      - Otherwise constrain ?industryGroup
+
+    This mirrors the original downstream implementation but uses the
+    shared core.naics helpers for consistency.
+    """
+    codes = normalize_naics_codes(naics_code)
+    if not codes:
         return ""
-    code = str(naics_code).strip()
-    if len(code) > 4:
-        return f"VALUES ?industryCode {{naics:NAICS-{code}}}."
-    else:
-        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}."
+    return build_simple_naics_values(codes[0])
 
 
 def _build_region_filter(region_code: Optional[str], county_var: str = "?county") -> str:

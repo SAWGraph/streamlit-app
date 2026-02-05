@@ -13,79 +13,13 @@ import requests
 from typing import Optional, Tuple
 
 from core.sparql import ENDPOINT_URLS, parse_sparql_results
+from core.naics_utils import normalize_naics_codes, build_naics_values_and_hierarchy
 
 # Alias for backward compatibility
 ENDPOINTS = ENDPOINT_URLS
 
-def _normalize_naics_codes(naics_code: str | list[str]) -> list[str]:
-    if isinstance(naics_code, (list, tuple, set)):
-        codes = [str(code).strip() for code in naics_code if str(code).strip()]
-    else:
-        codes = [str(naics_code).strip()] if naics_code else []
-    return sorted(set(codes))
-
-
-def _build_industry_filter(naics_codes: list[str]) -> str:
-    if not naics_codes:
-        return ""
-
-    industry_codes = [code for code in naics_codes if len(code) > 4]
-    industry_groups = [code for code in naics_codes if len(code) <= 4]
-
-    def _values(values: list[str]) -> str:
-        return ", ".join(f"naics:NAICS-{value}" for value in values)
-
-    if industry_codes and industry_groups:
-        return (
-            f"FILTER(?industryCode IN ({_values(industry_codes)}) || "
-            f"?industryGroup IN ({_values(industry_groups)}))."
-        )
-    if industry_codes:
-        return f"FILTER(?industryCode IN ({_values(industry_codes)}))."
-    return f"FILTER(?industryGroup IN ({_values(industry_groups)}))."
-
 
 # parse_sparql_results is imported from core.sparql
-
-
-def get_pfas_industries() -> pd.DataFrame:
-    """
-    Fetch PFAS-related industries from the KG.
-
-    Returns:
-        DataFrame with columns: industryCodeId, industryName, NAICS, industryGroup, industrySector
-    """
-    query = """
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX dcterms: <http://purl.org/dc/terms/>
-PREFIX fio: <http://w3id.org/fio/v1/fio#>
-PREFIX naics: <http://w3id.org/fio/v1/naics#>
-PREFIX fio-pfas:  <http://w3id.org/fio/v1/pfas#>
-
-SELECT DISTINCT ?industryCodeId ?industryName ?NAICS ?industryGroup ?industrySector
-WHERE {
-  ?pfasList fio:hasMember ?industryCode;
-            rdfs:subClassOf fio-pfas:IndustryCollectionByPFASContaminationConcern.
-  ?industryCode rdfs:label ?industryName;
-                fio:subcodeOf ?industryG.
-  OPTIONAL { ?industryCode dcterms:identifier ?industryCodeIdRaw. }
-  BIND(COALESCE(?industryCodeIdRaw, STRAFTER(STR(?industryCode), "NAICS-")) AS ?industryCodeId)
-  ?industryG rdf:type naics:NAICS-IndustryGroup;
-             rdfs:label ?industryGroup;
-             dcterms:identifier ?NAICS.
-  ?industryG fio:subcodeOf ?industryS.
-  ?industryS rdf:type naics:NAICS-IndustrySector;
-             rdfs:label ?industrySector.
-} ORDER BY ?industrySector
-"""
-    results = execute_sparql_query(ENDPOINTS["federation"], query, timeout=120)
-    df = parse_sparql_results(results)
-    if df.empty:
-        return pd.DataFrame(
-            columns=["industryCodeId", "industryName", "NAICS", "industryGroup", "industrySector"]
-        )
-    return df.dropna(subset=["NAICS"]).reset_index(drop=True)
 
 
 def _normalize_samples_df(samples_df: pd.DataFrame) -> pd.DataFrame:
@@ -133,51 +67,6 @@ def execute_sparql_query(endpoint: str, query: str, method: str = 'POST', timeou
         return None
 
 
-def _build_industry_values_clause(naics_codes: list[str]) -> tuple[str, str]:
-    """
-    Build industry filtering clauses (notebook style), including correct NAICS level handling.
-
-    Returns:
-      (values_clause, hierarchy_clause)
-    - values_clause: VALUES ... restricting the appropriate NAICS node.
-    - hierarchy_clause: additional fio:subcodeOf joins needed for sector/subsector filtering.
-    """
-    if not naics_codes:
-        return "", ""
-
-    code = str(naics_codes[0]).strip()
-    if not code:
-        return "", ""
-
-    # NAICS levels:
-    # - 2 digits: Sector
-    # - 3 digits: Subsector
-    # - 4 digits: Industry Group
-    # - 5-6 digits: Industry Code
-    if len(code) > 4:
-        return f"VALUES ?industryCode {{naics:NAICS-{code}}}.", ""
-    if len(code) == 4:
-        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}.", ""
-    if len(code) == 3:
-        return (
-            f"VALUES ?industrySubsector {{naics:NAICS-{code}}}.",
-            "?industryGroup fio:subcodeOf ?industrySubsector .",
-        )
-    if len(code) == 2:
-        return (
-            f"VALUES ?industrySector {{naics:NAICS-{code}}}.",
-            "\n".join(
-                [
-                    "?industryGroup fio:subcodeOf ?industrySubsector .",
-                    "?industrySubsector fio:subcodeOf ?industrySector .",
-                ]
-            ),
-        )
-
-    # Fallback: treat as group
-    return f"VALUES ?industryGroup {{naics:NAICS-{code}}}.", ""
-
-
 def execute_nearby_analysis(
     naics_code: str | list[str],
     region_code: Optional[str],
@@ -202,7 +91,7 @@ def execute_nearby_analysis(
     Returns:
         Tuple of (facilities_df, samples_df)
     """
-    naics_codes = _normalize_naics_codes(naics_code)
+    naics_codes = normalize_naics_codes(naics_code)
     industry_label = ", ".join(naics_codes) if naics_codes else "ALL industries"
     region_label = str(region_code).strip() if region_code else "ALL regions"
 
@@ -213,7 +102,12 @@ def execute_nearby_analysis(
     print(f"{'='*60}\n")
     
     # Build industry filter using VALUES clause (notebook style)
-    industry_values, industry_hierarchy = _build_industry_values_clause(naics_codes)
+    if naics_codes:
+        industry_values, industry_hierarchy = build_naics_values_and_hierarchy(
+            naics_codes[0]
+        )
+    else:
+        industry_values, industry_hierarchy = "", ""
     
     # Build region filter (optional).
     # IMPORTANT: filter on the facility-connected county (not S2 cells), so state + county behave correctly.
