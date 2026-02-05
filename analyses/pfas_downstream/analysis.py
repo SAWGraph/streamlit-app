@@ -74,15 +74,11 @@ def main(context: AnalysisContext) -> None:
     min_concentration = conc_filter.min_concentration
     max_concentration = conc_filter.max_concentration
 
-    # Execute button - state and industry are required; county is optional
-    has_state = bool(context.selected_state_code)
-    has_county = bool(context.selected_county_code)
+    # Execute button - industry required; state and county optional (per RegionConfig)
     has_industry = bool(selected_naics_code)
-    can_execute = has_state and has_industry
+    can_execute = has_industry
 
     missing = []
-    if not has_state:
-        missing.append("state")
     if not has_industry:
         missing.append("industry")
 
@@ -101,13 +97,11 @@ def main(context: AnalysisContext) -> None:
         # Apply pending concentration filter values
         min_concentration, max_concentration, include_nondetects = apply_concentration_filter(analysis_key)
         
-        # Validate all required fields
+        # Validate required fields (industry required; state/county optional)
         missing_fields = []
-        if not context.selected_state_code:
-            missing_fields.append("state")
         if not selected_naics_code:
             missing_fields.append("industry type")
-        
+
         if missing_fields:
             st.error(f"❌ **Missing required selections!** Please select: {', '.join(missing_fields)}")
         else:
