@@ -32,8 +32,10 @@ def main(context: AnalysisContext) -> None:
     st.markdown("""
     **What this analysis does:**
     - Find all facilities of a specific industry type (optionally filtered by region)
-    - Expand search to neighboring areas (S2 cells)
+    - Expand search to neighboring areas (
     - Identify contaminated samples near those facilities
+    
+    **3-Step Process:** Find facilities → Expand to neighboring areas → Identify contaminated samples
     
     **Use case:** Determine if PFAS contamination exists near specific industries (e.g., sewage treatment, landfills, manufacturing)
     """)
@@ -81,37 +83,65 @@ def main(context: AnalysisContext) -> None:
         region_boundary_df = None
         state_boundary_df = None
         county_boundary_df = None
-        with st.spinner(f"Searching for samples near {selected_industry_display}..."):
-            # Execute the consolidated analysis (single query)
-            facilities_df, samples_df = execute_nearby_analysis(
-                naics_code=selected_naics_code,
-                region_code=context.region_code,
-                min_concentration=min_concentration,
-                max_concentration=max_concentration,
-                include_nondetects=include_nondetects
-            )
-            # Fetch both state + county boundaries when available; county drawn on top.
-            state_boundary_df = (
-                get_region_boundary(context.selected_state_code) if context.selected_state_code else None
-            )
-            county_boundary_df = (
-                get_region_boundary(context.selected_county_code) if context.selected_county_code else None
-            )
-            region_boundary_df = (
-                county_boundary_df
-                if (county_boundary_df is not None and not county_boundary_df.empty)
-                else state_boundary_df
-            )
-            
-            # Store results in session state
-            st.session_state[facilities_key] = facilities_df
-            st.session_state[samples_key] = samples_df
-            st.session_state[industry_key] = selected_industry_display
-            st.session_state[region_code_key] = context.region_code
-            st.session_state[f"{analysis_key}_region_boundary_df"] = region_boundary_df
-            st.session_state[f"{analysis_key}_state_boundary_df"] = state_boundary_df
-            st.session_state[f"{analysis_key}_county_boundary_df"] = county_boundary_df
-            st.session_state[executed_key] = True
+
+        st.markdown("---")
+        st.subheader("🚀 Query Execution")
+        prog_col1, prog_col2, prog_col3 = st.columns(3)
+
+        with prog_col1:
+            with st.spinner("🔄 Step 1: Finding facilities..."):
+                facilities_df, samples_df = execute_nearby_analysis(
+                    naics_code=selected_naics_code,
+                    region_code=context.region_code,
+                    min_concentration=min_concentration,
+                    max_concentration=max_concentration,
+                    include_nondetects=include_nondetects
+                )
+            if not facilities_df.empty:
+                st.success(f"✅ Step 1: Found {len(facilities_df)} facilities")
+            else:
+                st.warning("⚠️ Step 1: No facilities found")
+
+        with prog_col2:
+            st.success("✅ Step 2: Expanded to neighboring areas")
+
+        with prog_col3:
+            if not samples_df.empty:
+                st.success(f"✅ Step 3: Found {len(samples_df)} contaminated samples")
+            else:
+                st.info("ℹ️ Step 3: No contaminated samples found")
+
+        # Fetch both state + county boundaries when available; county drawn on top.
+        state_boundary_df = (
+            get_region_boundary(context.selected_state_code) if context.selected_state_code else None
+        )
+        county_boundary_df = (
+            get_region_boundary(context.selected_county_code) if context.selected_county_code else None
+        )
+        region_boundary_df = (
+            county_boundary_df
+            if (county_boundary_df is not None and not county_boundary_df.empty)
+            else state_boundary_df
+        )
+
+        params_data = [
+            {"Parameter": "Industry Type", "Value": selected_industry_display},
+            {"Parameter": "Geographic Region", "Value": context.region_display or "All Regions"},
+            {"Parameter": "Detected Concentration", "Value": f"{min_concentration} - {max_concentration} ng/L"},
+            {"Parameter": "Include nondetects", "Value": "Yes" if include_nondetects else "No"},
+        ]
+        params_df = pd.DataFrame(params_data)
+
+        # Store results in session state
+        st.session_state[facilities_key] = facilities_df
+        st.session_state[samples_key] = samples_df
+        st.session_state[industry_key] = selected_industry_display
+        st.session_state[region_code_key] = context.region_code
+        st.session_state[f"{analysis_key}_region_boundary_df"] = region_boundary_df
+        st.session_state[f"{analysis_key}_state_boundary_df"] = state_boundary_df
+        st.session_state[f"{analysis_key}_county_boundary_df"] = county_boundary_df
+        st.session_state[f"{analysis_key}_params_df"] = params_df
+        st.session_state[executed_key] = True
     
     # Display Results
     if st.session_state.get(executed_key, False):
@@ -121,42 +151,126 @@ def main(context: AnalysisContext) -> None:
         region_boundary_df = st.session_state.get(f"{analysis_key}_region_boundary_df")
         state_boundary_df = st.session_state.get(f"{analysis_key}_state_boundary_df")
         county_boundary_df = st.session_state.get(f"{analysis_key}_county_boundary_df")
+        params_df = st.session_state.get(f"{analysis_key}_params_df")
+        query_region_code = st.session_state.get(region_code_key)
         
         st.markdown("---")
-        st.markdown("### 📊 Results")
+        if params_df is not None and not params_df.empty:
+            st.markdown("### 📋 Selected Parameters (from executed query)")
+            st.table(params_df)
+        st.markdown("### 🔬 Query Results")
         
-        # Metrics
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("🏭 Facilities Found", len(facilities_df))
-        with col2:
-            st.metric("🧪 Contaminated Samples", len(samples_df))
+        st.markdown("---")
         
-        # Results tabs
-        if not facilities_df.empty or not samples_df.empty:
-            tab1, tab2, tab3 = st.tabs(["🗺️ Map", "🏭 Facilities", "🧪 Samples"])
+        # Step 1: Facilities
+        if not facilities_df.empty:
+            st.markdown("### 🏭 Step 1: Facilities")
             
-            with tab1:
-                # Create map
-                if not facilities_df.empty and 'facWKT' in facilities_df.columns:
-                    st.markdown("#### Interactive Map")
-                    
-                    # Convert to GeoDataFrames
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Facilities", len(facilities_df))
+            with col2:
+                if 'industryName' in facilities_df.columns:
+                    st.metric("Industry Types", facilities_df['industryName'].nunique())
+            
+            with st.expander("📊 View Facilities Data"):
+                display_cols = [c for c in ['facilityName', 'industryName', 'facility'] if c in facilities_df.columns]
+                if display_cols:
+                    st.dataframe(facilities_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(facilities_df, use_container_width=True)
+                
+                csv_facilities = facilities_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Facilities CSV",
+                    data=csv_facilities,
+                    file_name=f"near_facilities_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_facilities"
+                )
+        
+        # Step 2: Contaminated Samples
+        if not samples_df.empty:
+            st.markdown("### 🧪 Step 2: Contaminated Samples")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Samples", len(samples_df))
+            with col2:
+                if 'sp' in samples_df.columns:
+                    st.metric("Unique Sample Points", samples_df['sp'].nunique())
+            with col3:
+                if 'max' in samples_df.columns:
                     try:
-                        facilities_gdf = facilities_df.copy()
-                        facilities_gdf['geometry'] = facilities_gdf['facWKT'].apply(wkt.loads)
-                        facilities_gdf = gpd.GeoDataFrame(facilities_gdf, geometry='geometry', crs='EPSG:4326')
-                        
-                        # Get center point
-                        center_lat = facilities_gdf.geometry.centroid.y.mean()
-                        center_lon = facilities_gdf.geometry.centroid.x.mean()
-                        
-                        # Create map
-                        map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+                        max_vals = pd.to_numeric(samples_df['max'], errors='coerce')
+                        if max_vals.notna().any():
+                            st.metric("Max Concentration", f"{max_vals.max():.2f} ng/L")
+                    except Exception:
+                        pass
+            
+            with st.expander("📊 View Samples Data"):
+                # Clean up unit encoding for display (matches notebook behavior)
+                samples_display_df = samples_df.copy()
+                for col in ("unit", "datedresults", "results"):
+                    if col in samples_display_df.columns:
+                        s = samples_display_df[col]
+                        mask = s.notna()
+                        samples_display_df.loc[mask, col] = (
+                            s.loc[mask].astype(str).str.replace("Î¼", "μ")
+                        )
+                
+                display_cols = [
+                    c for c in ['max', 'resultCount', 'datedresults', 'Materials', 'Type', 'spName', 'sp']
+                    if c in samples_display_df.columns
+                ]
+                if display_cols:
+                    st.dataframe(samples_display_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(samples_display_df, use_container_width=True)
+                
+                # Summary statistics
+                if 'max' in samples_display_df.columns:
+                    st.markdown("##### 📈 Concentration Statistics")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Max (ng/L)", f"{samples_display_df['max'].max():.2f}")
+                    with col2:
+                        st.metric("Mean (ng/L)", f"{samples_display_df['max'].mean():.2f}")
+                    with col3:
+                        st.metric("Median (ng/L)", f"{samples_display_df['max'].median():.2f}")
+                
+                csv_samples = samples_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Samples CSV",
+                    data=csv_samples,
+                    file_name=f"near_facilities_samples_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_samples"
+                )
+        
+        # Map section
+        if not facilities_df.empty or not samples_df.empty:
+            if not facilities_df.empty and 'facWKT' in facilities_df.columns:
+                st.markdown("---")
+                st.markdown("### 🗺️ Interactive Map")
+                
+                # Create map
+                # Convert to GeoDataFrames
+                try:
+                    facilities_gdf = facilities_df.copy()
+                    facilities_gdf['geometry'] = facilities_gdf['facWKT'].apply(wkt.loads)
+                    facilities_gdf = gpd.GeoDataFrame(facilities_gdf, geometry='geometry', crs='EPSG:4326')
+                    
+                    # Get center point
+                    center_lat = facilities_gdf.geometry.centroid.y.mean()
+                    center_lon = facilities_gdf.geometry.centroid.x.mean()
+                    
+                    # Create map
+                    map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
 
-                        # Ensure popups wrap long content instead of overflowing outside the card.
-                        try:
-                            popup_css = """
+                    # Ensure popups wrap long content instead of overflowing outside the card.
+                    try:
+                        popup_css = """
 <style>
 .leaflet-popup-content { min-width: 420px !important; max-width: 900px !important; width: auto !important; }
 .leaflet-popup-content table { width: 100% !important; table-layout: auto; }
@@ -172,186 +286,135 @@ def main(context: AnalysisContext) -> None:
 }
 </style>
 """
-                            map_obj.get_root().header.add_child(folium.Element(popup_css))
-                        except Exception:
-                            pass
-                        
-                        # Add state + county boundaries (state first, then county on top)
-                        query_region_code = st.session_state.get(region_code_key)
-                        boundary_layers = []
-                        if state_boundary_df is not None and not state_boundary_df.empty:
-                            boundary_layers.append(("State", state_boundary_df, "#000000"))
-                        if county_boundary_df is not None and not county_boundary_df.empty:
-                            boundary_layers.append(("County", county_boundary_df, "#666666"))
+                        map_obj.get_root().header.add_child(folium.Element(popup_css))
+                    except Exception:
+                        pass
+                    
+                    # Add state + county boundaries (state first, then county on top)
+                    boundary_layers = []
+                    if state_boundary_df is not None and not state_boundary_df.empty:
+                        boundary_layers.append(("State", state_boundary_df, "#000000"))
+                    if county_boundary_df is not None and not county_boundary_df.empty:
+                        boundary_layers.append(("County", county_boundary_df, "#666666"))
 
-                        # Fallback to the single region boundary if present
-                        if not boundary_layers and region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
-                            region_code_len = len(str(query_region_code))
-                            if region_code_len == 5:
-                                boundary_layers.append(("County", region_boundary_df, "#666666"))
-                            else:
-                                boundary_layers.append(("State", region_boundary_df, "#000000"))
+                    # Fallback to the single region boundary if present
+                    if not boundary_layers and region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
+                        region_code_len = len(str(query_region_code))
+                        if region_code_len == 5:
+                            boundary_layers.append(("County", region_boundary_df, "#666666"))
+                        else:
+                            boundary_layers.append(("State", region_boundary_df, "#000000"))
 
-                        for region_type, bdf, boundary_color in boundary_layers:
-                            boundary_wkt = bdf.iloc[0]["countyWKT"]
-                            boundary_name = bdf.iloc[0].get("countyName", region_type)
-                            boundary_gdf = gpd.GeoDataFrame(
-                                index=[0],
-                                crs="EPSG:4326",
-                                geometry=[wkt.loads(boundary_wkt)],
+                    for region_type, bdf, boundary_color in boundary_layers:
+                        boundary_wkt = bdf.iloc[0]["countyWKT"]
+                        boundary_name = bdf.iloc[0].get("countyName", region_type)
+                        boundary_gdf = gpd.GeoDataFrame(
+                            index=[0],
+                            crs="EPSG:4326",
+                            geometry=[wkt.loads(boundary_wkt)],
+                        )
+                        folium.GeoJson(
+                            boundary_gdf.to_json(),
+                            name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
+                            style_function=lambda _x, c=boundary_color: {
+                                "fillColor": "#ffffff00",
+                                "color": c,
+                                "weight": 3,
+                                "fillOpacity": 0.0,
+                            },
+                        ).add_to(map_obj)
+                    
+                    # Add facilities (blue markers) - ensure popup has the full info (same as hover)
+                    if "facility" in facilities_gdf.columns:
+                        facilities_gdf["facility_link"] = facilities_gdf["facility"].apply(
+                            lambda x: (
+                                f'<a href="https://frs-public.epa.gov/ords/frs_public2/fii_query_detail.disp_program_facility?p_registry_id={x.split(".")[-1]}" target="_blank">FRS {x.split(".")[-1]}</a>'
+                                if x
+                                else x
                             )
-                            folium.GeoJson(
-                                boundary_gdf.to_json(),
-                                name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
-                                style_function=lambda _x, c=boundary_color: {
-                                    "fillColor": "#ffffff00",
-                                    "color": c,
-                                    "weight": 3,
-                                    "fillOpacity": 0.0,
-                                },
-                            ).add_to(map_obj)
+                        )
+
+                    # Shorten NAICS URI for display (avoids long URLs in the popup)
+                    if "industryCode" in facilities_gdf.columns:
+                        facilities_gdf["industryCode_short"] = facilities_gdf["industryCode"].apply(
+                            lambda x: str(x).split("#")[-1] if x else x
+                        )
+
+                    facility_popup_fields = [
+                        c
+                        for c in ["facility_link", "facilityName", "industryName", "industryCode_short"]
+                        if c in facilities_gdf.columns
+                    ]
+
+                    facilities_gdf.explore(
+                        m=map_obj,
+                        name=f'<span style="color:Blue;">🏭 {industry_display} ({len(facilities_gdf)})</span>',
+                        color='Blue',
+                        marker_kwds=dict(radius=8),
+                        popup=facility_popup_fields if facility_popup_fields else True,
+                        tooltip=facility_popup_fields if facility_popup_fields else True,
+                        popup_kwds={"max_width": 650, "parse_html": True},
+                        tooltip_kwds={"sticky": True, "parse_html": True},
+                        show=True
+                    )
+                    
+                    # Add samples if available (orange markers)
+                    if not samples_df.empty and 'spWKT' in samples_df.columns:
+                        samples_gdf = samples_df.copy()
+                        samples_gdf['geometry'] = samples_gdf['spWKT'].apply(wkt.loads)
+                        samples_gdf = gpd.GeoDataFrame(samples_gdf, geometry='geometry', crs='EPSG:4326')
                         
-                        # Add facilities (blue markers) - ensure popup has the full info (same as hover)
-                        if "facility" in facilities_gdf.columns:
-                            facilities_gdf["facility_link"] = facilities_gdf["facility"].apply(
-                                lambda x: (
-                                    f'<a href="https://frs-public.epa.gov/ords/frs_public2/fii_query_detail.disp_program_facility?p_registry_id={x.split(".")[-1]}" target="_blank">FRS {x.split(".")[-1]}</a>'
-                                    if x
-                                    else x
+                        # Keep popups focused: prefer datedresults and avoid redundant results/dates.
+                        # We drop redundant columns from the map layer itself so they can't appear even if
+                        # Folium/GeoPandas falls back to "show all properties".
+                        samples_map_gdf = samples_gdf.drop(
+                            columns=[c for c in ["results", "dates"] if c in samples_gdf.columns],
+                            errors="ignore",
+                        )
+
+                        # Clean up unit encoding (matches notebook behavior)
+                        for col in ("unit", "datedresults", "results"):
+                            if col in samples_map_gdf.columns:
+                                s = samples_map_gdf[col]
+                                mask = s.notna()
+                                samples_map_gdf.loc[mask, col] = (
+                                    s.loc[mask].astype(str).str.replace("Î¼", "μ")
                                 )
-                            )
-
-                        # Shorten NAICS URI for display (avoids long URLs in the popup)
-                        if "industryCode" in facilities_gdf.columns:
-                            facilities_gdf["industryCode_short"] = facilities_gdf["industryCode"].apply(
-                                lambda x: str(x).split("#")[-1] if x else x
-                            )
-
-                        facility_popup_fields = [
+                        sample_popup_fields = [
                             c
-                            for c in ["facility_link", "facilityName", "industryName", "industryCode_short"]
-                            if c in facilities_gdf.columns
+                            for c in ["resultCount", "max", "datedresults", "Materials", "Type", "spName"]
+                            if c in samples_map_gdf.columns
                         ]
+                        if not sample_popup_fields and "datedresults" in samples_map_gdf.columns:
+                            sample_popup_fields = ["datedresults"]
 
-                        facilities_gdf.explore(
+                        samples_map_gdf.explore(
                             m=map_obj,
-                            name=f'<span style="color:Blue;">🏭 {industry_display} ({len(facilities_gdf)})</span>',
-                            color='Blue',
-                            marker_kwds=dict(radius=8),
-                            popup=facility_popup_fields if facility_popup_fields else True,
-                            tooltip=facility_popup_fields if facility_popup_fields else True,
-                            popup_kwds={"max_width": 650, "parse_html": True},
-                            tooltip_kwds={"sticky": True, "parse_html": True},
+                            name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_map_gdf)})</span>',
+                            color='DarkOrange',
+                            marker_kwds=dict(radius=6),
+                            popup=sample_popup_fields if sample_popup_fields else ["datedresults"],
+                            popup_kwds={'max_height': 450, 'max_width': 450},
                             show=True
                         )
-                        
-                        # Add samples if available (orange markers)
-                        if not samples_df.empty and 'spWKT' in samples_df.columns:
-                            samples_gdf = samples_df.copy()
-                            samples_gdf['geometry'] = samples_gdf['spWKT'].apply(wkt.loads)
-                            samples_gdf = gpd.GeoDataFrame(samples_gdf, geometry='geometry', crs='EPSG:4326')
-                            
-                            # Keep popups focused: prefer datedresults and avoid redundant results/dates.
-                            # We drop redundant columns from the map layer itself so they can't appear even if
-                            # Folium/GeoPandas falls back to "show all properties".
-                            samples_map_gdf = samples_gdf.drop(
-                                columns=[c for c in ["results", "dates"] if c in samples_gdf.columns],
-                                errors="ignore",
-                            )
-
-                            # Clean up unit encoding (matches notebook behavior)
-                            for col in ("unit", "datedresults", "results"):
-                                if col in samples_map_gdf.columns:
-                                    s = samples_map_gdf[col]
-                                    mask = s.notna()
-                                    samples_map_gdf.loc[mask, col] = (
-                                        s.loc[mask].astype(str).str.replace("Î¼", "μ")
-                                    )
-                            sample_popup_fields = [
-                                c
-                                for c in ["resultCount", "max", "datedresults", "Materials", "Type", "spName"]
-                                if c in samples_map_gdf.columns
-                            ]
-                            if not sample_popup_fields and "datedresults" in samples_map_gdf.columns:
-                                sample_popup_fields = ["datedresults"]
-
-                            samples_map_gdf.explore(
-                                m=map_obj,
-                                name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_map_gdf)})</span>',
-                                color='DarkOrange',
-                                marker_kwds=dict(radius=6),
-                                popup=sample_popup_fields if sample_popup_fields else ["datedresults"],
-                                popup_kwds={'max_height': 450, 'max_width': 450},
-                                show=True
-                            )
-                        
-                        # Add layer control
-                        folium.LayerControl(collapsed=True).add_to(map_obj)
-                        
-                        # Display map
-                        st_folium(map_obj, width=None, height=600, returned_objects=[])
-                        
-                        st.info("""
-                        **🗺️ Map Legend:**
-                        - 📍 **Boundary** = Selected region (black=state, gray=county, red=subdivision)
-                        - 🔵 **Blue markers** = Facilities of selected industry type
-                        - 🟠 **Orange markers** = Contaminated sample points nearby
-                        """)
-                        
-                    except Exception as e:
-                        st.error(f"Error creating map: {e}")
-                else:
-                    st.warning("No facility location data available for mapping")
-            
-            with tab2:
-                if not facilities_df.empty:
-                    st.markdown(f"#### 🏭 {industry_display}")
                     
-                    # Select display columns
-                    display_cols = [c for c in ['facilityName', 'industryName', 'facility'] if c in facilities_df.columns]
-                    if display_cols:
-                        st.dataframe(facilities_df[display_cols], use_container_width=True)
-                    else:
-                        st.dataframe(facilities_df, use_container_width=True)
-                else:
-                    st.info("No facilities found matching the criteria")
-            
-            with tab3:
-                if not samples_df.empty:
-                    st.markdown("#### 🧪 Contaminated Sample Points")
-
-                    # Clean up unit encoding for display (matches notebook behavior)
-                    samples_display_df = samples_df.copy()
-                    for col in ("unit", "datedresults", "results"):
-                        if col in samples_display_df.columns:
-                            s = samples_display_df[col]
-                            mask = s.notna()
-                            samples_display_df.loc[mask, col] = (
-                                s.loc[mask].astype(str).str.replace("Î¼", "μ")
-                            )
+                    # Add layer control
+                    folium.LayerControl(collapsed=True).add_to(map_obj)
                     
-                    # Select display columns
-                    display_cols = [
-                        c for c in ['max', 'resultCount', 'datedresults', 'Materials', 'Type', 'spName', 'sp']
-                        if c in samples_display_df.columns
-                    ]
-                    if display_cols:
-                        st.dataframe(samples_display_df[display_cols], use_container_width=True)
-                    else:
-                        st.dataframe(samples_display_df, use_container_width=True)
+                    # Display map
+                    st_folium(map_obj, width=None, height=600, returned_objects=[])
                     
-                    # Summary statistics
-                    if 'max' in samples_display_df.columns:
-                        st.markdown("##### 📈 Concentration Statistics")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Max (ng/L)", f"{samples_display_df['max'].max():.2f}")
-                        with col2:
-                            st.metric("Mean (ng/L)", f"{samples_display_df['max'].mean():.2f}")
-                        with col3:
-                            st.metric("Median (ng/L)", f"{samples_display_df['max'].median():.2f}")
-                else:
-                    st.info("No contaminated samples found near the selected facilities")
+                    st.info("""
+                    **🗺️ Map Legend:**
+                    - 📍 **Boundary** = Selected region (black=state, gray=county, red=subdivision)
+                    - 🔵 **Blue markers** = Facilities of selected industry type
+                    - 🟠 **Orange markers** = Contaminated sample points nearby
+                    """)
+                    
+                except Exception as e:
+                    st.error(f"Error creating map: {e}")
+            else:
+                st.warning("No facility location data available for mapping")
         else:
             st.warning("No results found. Try a different industry type or region.")
     else:

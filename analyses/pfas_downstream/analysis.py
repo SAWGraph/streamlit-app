@@ -39,7 +39,10 @@ def main(context: AnalysisContext) -> None:
     - Traces *downstream* through hydrological flow paths from those facilities
     - Identifies contaminated sample points downstream
     
+    **3-Step Process:** Find facilities → Trace downstream → Identify contaminated samples
+    
     **Use case:** Determine if PFAS contamination flows downstream from specific industries (e.g., waste treatment, landfills, manufacturing)
+    
     """)
     
     # Initialize session state for analysis-specific params
@@ -262,14 +265,116 @@ def main(context: AnalysisContext) -> None:
         st.markdown("---")
         st.markdown("### 🔬 Query Results")
         
-        # Summary metrics
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("🏭 Facilities", len(facilities_df) if facilities_df is not None else 0)
-        with col2:
-            st.metric("🌊 Flowlines", len(streams_df) if streams_df is not None else 0)
-        with col3:
-            st.metric("🧪 Downstream Samples", len(samples_df) if samples_df is not None else 0)
+        st.markdown("---")
+        
+        # Step 1: Facilities
+        if facilities_df is not None and not facilities_df.empty:
+            st.markdown("### 🏭 Step 1: Facilities")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Facilities", len(facilities_df))
+            with col2:
+                if 'industryName' in facilities_df.columns:
+                    st.metric("Industry Types", facilities_df['industryName'].nunique())
+            
+            with st.expander("📊 View Facilities Data"):
+                display_cols = [c for c in ['facilityName', 'industryName', 'industryCode', 'facility'] if c in facilities_df.columns]
+                if display_cols:
+                    st.dataframe(facilities_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(facilities_df, use_container_width=True)
+                
+                csv_facilities = facilities_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Facilities CSV",
+                    data=csv_facilities,
+                    file_name=f"downstream_facilities_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_facilities"
+                )
+        
+        # Step 2: Downstream Streams
+        if streams_df is not None and not streams_df.empty:
+            st.markdown("### 🌊 Step 2: Downstream Streams")
+            
+            stream_names = (
+                streams_df["streamName"].dropna().unique()
+                if "streamName" in streams_df.columns
+                else []
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Flowlines", len(streams_df))
+            with col2:
+                st.metric("Named Streams", len(stream_names))
+            
+            with st.expander("📊 View Streams Data"):
+                display_cols = [c for c in ['streamName', 'fl_type', 'downstream_flowline'] if c in streams_df.columns]
+                if display_cols:
+                    st.dataframe(streams_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(streams_df, use_container_width=True)
+                
+                csv_streams = streams_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Streams CSV",
+                    data=csv_streams,
+                    file_name=f"downstream_streams_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_streams"
+                )
+        
+        # Step 3: Downstream Samples
+        if samples_df is not None and not samples_df.empty:
+            st.markdown("### 🧪 Step 3: Downstream Samples")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Samples", len(samples_df))
+            with col2:
+                if 'samplePoint' in samples_df.columns:
+                    st.metric("Unique Sample Points", samples_df['samplePoint'].nunique())
+            with col3:
+                if 'Max' in samples_df.columns:
+                    try:
+                        max_vals = pd.to_numeric(samples_df['Max'], errors='coerce')
+                        if max_vals.notna().any():
+                            st.metric("Max Concentration", f"{max_vals.max():.2f} ng/L")
+                    except Exception:
+                        pass
+            
+            with st.expander("📊 View Samples Data"):
+                display_cols = [c for c in ['Max', 'resultCount', 'unit', 'results', 'samplePoint', 'sample'] if c in samples_df.columns]
+                if display_cols:
+                    st.dataframe(samples_df[display_cols], use_container_width=True)
+                else:
+                    st.dataframe(samples_df, use_container_width=True)
+                
+                # Summary statistics
+                if 'Max' in samples_df.columns:
+                    st.markdown("##### 📈 Concentration Statistics")
+                    try:
+                        max_vals = pd.to_numeric(samples_df['Max'], errors='coerce')
+                        if max_vals.notna().any():
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Max (ng/L)", f"{max_vals.max():.2f}")
+                            with col2:
+                                st.metric("Mean (ng/L)", f"{max_vals.mean():.2f}")
+                            with col3:
+                                st.metric("Median (ng/L)", f"{max_vals.median():.2f}")
+                    except Exception:
+                        pass
+                
+                csv_samples = samples_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Samples CSV",
+                    data=csv_samples,
+                    file_name=f"downstream_samples_{query_region_code or 'all'}.csv",
+                    mime="text/csv",
+                    key=f"download_{analysis_key}_samples"
+                )
         
         # Map section
         has_facility_wkt = facilities_df is not None and not facilities_df.empty and 'facWKT' in facilities_df.columns
@@ -566,90 +671,5 @@ def main(context: AnalysisContext) -> None:
                 if len(stream_names) > 0:
                     with st.expander(f"🌊 Stream Names ({len(stream_names)} unique streams)"):
                         st.write(", ".join(sorted(stream_names)))
-        
-        # Data tabs
-        st.markdown("---")
-        st.markdown("### 📊 Data Tables")
-        
-        tab1, tab2, tab3 = st.tabs(["🏭 Facilities", "🌊 Streams", "🧪 Samples"])
-        
-        with tab1:
-            if facilities_df is not None and not facilities_df.empty:
-                st.markdown(f"#### 🏭 {selected_industry}")
-                
-                # Select display columns
-                display_cols = [c for c in ['facilityName', 'industryName', 'industryCode', 'facility'] if c in facilities_df.columns]
-                if display_cols:
-                    st.dataframe(facilities_df[display_cols], use_container_width=True)
-                else:
-                    st.dataframe(facilities_df, use_container_width=True)
-                
-                st.download_button(
-                    label="📥 Download Facilities CSV",
-                    data=facilities_df.to_csv(index=False),
-                    file_name=f"downstream_facilities_{query_region_code or 'all'}.csv",
-                    mime="text/csv",
-                    key=f"download_{analysis_key}_facilities"
-                )
-            else:
-                st.info("No facilities found")
-        
-        with tab2:
-            if streams_df is not None and not streams_df.empty:
-                st.markdown("#### 🌊 Downstream Flowlines")
-                
-                # Select display columns
-                display_cols = [c for c in ['streamName', 'fl_type', 'downstream_flowline'] if c in streams_df.columns]
-                if display_cols:
-                    st.dataframe(streams_df[display_cols], use_container_width=True)
-                else:
-                    st.dataframe(streams_df, use_container_width=True)
-                
-                st.download_button(
-                    label="📥 Download Streams CSV",
-                    data=streams_df.to_csv(index=False),
-                    file_name=f"downstream_streams_{query_region_code or 'all'}.csv",
-                    mime="text/csv",
-                    key=f"download_{analysis_key}_streams"
-                )
-            else:
-                st.info("No downstream flowlines found")
-        
-        with tab3:
-            if samples_df is not None and not samples_df.empty:
-                st.markdown("#### 🧪 Contaminated Samples Downstream")
-                
-                # Select display columns
-                display_cols = [c for c in ['Max', 'resultCount', 'unit', 'results', 'samplePoint', 'sample'] if c in samples_df.columns]
-                if display_cols:
-                    st.dataframe(samples_df[display_cols], use_container_width=True)
-                else:
-                    st.dataframe(samples_df, use_container_width=True)
-                
-                # Summary statistics
-                if 'Max' in samples_df.columns:
-                    st.markdown("##### 📈 Concentration Statistics")
-                    try:
-                        max_vals = pd.to_numeric(samples_df['Max'], errors='coerce')
-                        if max_vals.notna().any():
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Max (ng/L)", f"{max_vals.max():.2f}")
-                            with col2:
-                                st.metric("Mean (ng/L)", f"{max_vals.mean():.2f}")
-                            with col3:
-                                st.metric("Median (ng/L)", f"{max_vals.median():.2f}")
-                    except Exception:
-                        pass
-                
-                st.download_button(
-                    label="📥 Download Samples CSV",
-                    data=samples_df.to_csv(index=False),
-                    file_name=f"downstream_samples_{query_region_code or 'all'}.csv",
-                    mime="text/csv",
-                    key=f"download_{analysis_key}_samples"
-                )
-            else:
-                st.info("No contaminated samples found downstream")
     else:
         st.info("👈 Select a state, county, and industry type in the sidebar, then click 'Execute Query' to run the analysis")
