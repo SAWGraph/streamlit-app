@@ -4,8 +4,17 @@ Analysis Registry - Centralized configuration for all analyses
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 import pandas as pd
+
+
+@dataclass
+class RegionConfig:
+    """Configuration for region selector visibility and requirements."""
+    state: Literal["required", "optional", "hidden"] = "optional"
+    county: Literal["required", "optional", "hidden"] = "optional"
+    subdivision: Literal["required", "optional", "hidden"] = "optional"
+    availability_source: Literal["pfas", "sockg", None] = "pfas"
 
 
 @dataclass
@@ -49,6 +58,7 @@ class AnalysisSpec:
     query: int
     enabled: bool
     runner: Callable[[AnalysisContext], None]
+    region_config: RegionConfig = None  # If None, uses default config
 
 
 def _disabled_stub(key: str) -> Callable[[AnalysisContext], None]:
@@ -63,13 +73,13 @@ def build_registry() -> dict[str, AnalysisSpec]:
     """
     Build the analysis registry with lazy imports to avoid loading all modules at startup.
     """
-    # Lazy imports prevent unnecessary module loading and side effects at import time
-    from analyses.pfas_upstream import main as upstream_main
-    from analyses.pfas_downstream import main as downstream_main
-    from analyses.samples_near_facilities import main as near_facilities_main
-    from analyses.regional_overview import main as regional_main
-    from analyses.facility_risk import main as risk_main
-    from analyses.sockg_sites import main as sockg_main
+    # Lazy imports from new folder structure
+    from analyses.pfas_upstream.analysis import main as upstream_main
+    from analyses.pfas_downstream.analysis import main as downstream_main
+    from analyses.samples_near_facilities.analysis import main as near_facilities_main
+    from analyses.regional_overview.analysis import main as regional_main
+    from analyses.facility_risk.analysis import main as risk_main
+    from analyses.sockg_sites.analysis import main as sockg_main
     
     specs = [
         AnalysisSpec(
@@ -80,6 +90,12 @@ def build_registry() -> dict[str, AnalysisSpec]:
             query=2,
             enabled=True,
             runner=near_facilities_main,
+            region_config=RegionConfig(
+                state="optional",
+                county="optional",
+                subdivision="optional",
+                availability_source="pfas",
+            ),
         ),
         AnalysisSpec(
             key="downstream",
@@ -89,6 +105,12 @@ def build_registry() -> dict[str, AnalysisSpec]:
             query=5,
             enabled=True,
             runner=downstream_main,
+            region_config=RegionConfig(
+                state="optional",
+                county="optional",
+                subdivision="optional",
+                availability_source="pfas",
+            ),
         ),
         AnalysisSpec(
             key="upstream",
@@ -98,6 +120,12 @@ def build_registry() -> dict[str, AnalysisSpec]:
             query=1,
             enabled=True,
             runner=upstream_main,
+            region_config=RegionConfig(
+                state="required",
+                county="required",
+                subdivision="optional",
+                availability_source="pfas",
+            ),
         ),
         AnalysisSpec(
             key="sockg_sites",
@@ -107,6 +135,12 @@ def build_registry() -> dict[str, AnalysisSpec]:
             query=6,
             enabled=True,
             runner=sockg_main,
+            region_config=RegionConfig(
+                state="optional",
+                county="hidden",
+                subdivision="hidden",
+                availability_source="sockg",
+            ),
         ),
         AnalysisSpec(
             key="regional",
@@ -116,6 +150,12 @@ def build_registry() -> dict[str, AnalysisSpec]:
             query=3,
             enabled=False,
             runner=regional_main,
+            region_config=RegionConfig(
+                state="required",
+                county="optional",
+                subdivision="hidden",
+                availability_source="pfas",
+            ),
         ),
         AnalysisSpec(
             key="risk",
@@ -123,8 +163,14 @@ def build_registry() -> dict[str, AnalysisSpec]:
             title="⚠️ Facility Risk Assessment",
             description="Assess facility risk based on proximity, detections, and indicators.",
             query=4,
-            enabled=False,  # Currently a stub
+            enabled=False,
             runner=risk_main,
+            region_config=RegionConfig(
+                state="optional",
+                county="optional",
+                subdivision="hidden",
+                availability_source="pfas",
+            ),
         ),
     ]
     
@@ -134,9 +180,18 @@ def build_registry() -> dict[str, AnalysisSpec]:
         dupes = [s.key for s in specs if [x.key for x in specs].count(s.key) > 1]
         raise ValueError(f"Duplicate analysis keys found: {sorted(set(dupes))}")
     
-    # Swap runner for disabled analyses (optional UX improvement)
+    # Swap runner for disabled analyses
     for k, spec in list(registry.items()):
         if not spec.enabled:
-            registry[k] = AnalysisSpec(**{**spec.__dict__, "runner": _disabled_stub(spec.key)})
+            registry[k] = AnalysisSpec(
+                key=spec.key,
+                label=spec.label,
+                title=spec.title,
+                description=spec.description,
+                query=spec.query,
+                enabled=spec.enabled,
+                runner=_disabled_stub(spec.key),
+                region_config=spec.region_config,
+            )
     
     return registry

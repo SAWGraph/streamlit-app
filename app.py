@@ -1,19 +1,29 @@
+"""
+SAWGraph PFAS Explorer - Main Application Entry Point
+"""
 from __future__ import annotations
 
+import os
 import streamlit as st
 
-from analysis_registry import AnalysisContext, build_registry
-from components.data_loader import (
-    ENDPOINT_URLS,
-    PROJECT_DIR,
-    get_sockg_state_code_set,
+from analysis_registry import AnalysisContext, RegionConfig, build_registry
+from core.sparql import ENDPOINT_URLS
+from core.data_loader import (
     load_fips_data,
     load_material_types_data,
     load_substances_data,
     parse_regions,
 )
-from components.region_selector import RegionSelection, render_pfas_region_selector
+from filters.region import (
+    RegionSelection,
+    render_region_selector,
+)
+from analyses.sockg_sites.queries import get_sockg_state_code_set
 from components.start_page import render_start_page
+
+
+# Project directory
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _set_page_config() -> None:
@@ -25,67 +35,10 @@ def _set_page_config() -> None:
     )
 
 
-def _render_sockg_state_only_selector(states_df) -> RegionSelection:
-    """SOCKG only supports an optional state filter (no county/subdivision selector)."""
-    st.sidebar.markdown("### 📍 Geographic Region")
-    st.sidebar.markdown("_Optional: select a state to filter SOCKG sites_")
-
-    available_sockg_states = get_sockg_state_code_set()
-
-    state_name_map: dict[str, str] = {}
-    available_state_options: list[str] = []
-    unavailable_state_options: list[str] = []
-
-    for _, row in states_df.sort_values("state_name").iterrows():
-        state_name = row["state_name"]
-        state_code = str(row["fipsCode"]).zfill(2)
-        if state_code in available_sockg_states:
-            display_name = f"✓ {state_name}"
-            available_state_options.append(display_name)
-        else:
-            display_name = f"✗ {state_name}"
-            unavailable_state_options.append(display_name)
-        state_name_map[display_name] = state_name
-
-    state_options = ["-- All States --"] + available_state_options + unavailable_state_options
-
-    def on_state_change() -> None:
-        selected = st.session_state.sockg_state_selector
-        if selected.startswith("✗ "):
-            rejected_state = selected.replace("✗ ", "")
-            st.session_state.sockg_state_rejected_msg = (
-                f"❌ {rejected_state} has no SOCKG sites. Please select a state with ✓"
-            )
-            st.session_state.sockg_state_selector = "-- All States --"
-
-    if "sockg_state_rejected_msg" in st.session_state:
-        st.sidebar.error(st.session_state.sockg_state_rejected_msg)
-        del st.session_state.sockg_state_rejected_msg
-
-    selected_state_display = st.sidebar.selectbox(
-        "Select State (Optional)",
-        state_options,
-        key="sockg_state_selector",
-        on_change=on_state_change,
-    )
-
-    region = RegionSelection()
-    if selected_state_display != "-- All States --" and not selected_state_display.startswith("✗ "):
-        actual_state_name = state_name_map.get(
-            selected_state_display, selected_state_display.replace("✓ ", "")
-        )
-        region.state_name = actual_state_name
-        state_row = states_df[states_df["state_name"] == actual_state_name]
-        if not state_row.empty:
-            region.state_code = str(state_row.iloc[0]["fipsCode"]).zfill(2)
-
-    return region
-
-
 def main() -> None:
     _set_page_config()
 
-    # Load shared data once (cached in components/data_loader.py)
+    # Load shared data once (cached)
     fips_df = load_fips_data()
     states_df, counties_df, subdivisions_df = parse_regions(fips_df)
     substances_df = load_substances_data()
@@ -115,20 +68,25 @@ def main() -> None:
     st.sidebar.markdown("---")
 
     selected_key = label_to_key.get(analysis_label)
-    # Only Upstream requires county selection; Downstream county is optional.
-    region_required = selected_key in {"upstream"}
-
-    if selected_key == "sockg_sites":
-        region = _render_sockg_state_only_selector(states_df)
+    
+    # Get region config from the analysis spec, or use a default
+    if selected_key:
+        spec = registry[selected_key]
+        region_config = spec.region_config or RegionConfig()
     else:
-        region = render_pfas_region_selector(
-            states_df=states_df,
-            counties_df=counties_df,
-            subdivisions_df=subdivisions_df,
-            region_required=region_required,
-        )
-
-    st.sidebar.markdown("---")
+        region_config = RegionConfig()
+    
+    # Determine the SOCKG state codes function if needed
+    sockg_fn = get_sockg_state_code_set if region_config.availability_source == "sockg" else None
+    
+    # Render the unified region selector using the analysis's config
+    region = render_region_selector(
+        config=region_config,
+        states_df=states_df,
+        counties_df=counties_df,
+        subdivisions_df=subdivisions_df,
+        get_sockg_state_codes_fn=sockg_fn,
+    )
 
     if analysis_label == "-- Home --" or not selected_key:
         render_start_page(PROJECT_DIR)
@@ -162,4 +120,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
