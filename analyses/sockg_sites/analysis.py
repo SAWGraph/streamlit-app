@@ -13,7 +13,7 @@ from streamlit_folium import st_folium
 
 from analysis_registry import AnalysisContext
 from analyses.sockg_sites.queries import get_sockg_locations, get_sockg_facilities
-from filters.region import get_region_boundary
+from filters.region import get_region_boundary, add_region_boundary_layers
 
 
 def main(context: AnalysisContext) -> None:
@@ -349,25 +349,11 @@ def main(context: AnalysisContext) -> None:
                     show=True,
                 )
 
-        if region_boundary_df is not None and not region_boundary_df.empty:
-            # `get_region_boundary` returns columns named countyWKT/countyName even for states.
-            boundary_wkt = region_boundary_df.iloc[0]["countyWKT"]
-            boundary_name = region_boundary_df.iloc[0].get("countyName", "State")
-            boundary_gdf = gpd.GeoDataFrame(
-                index=[0],
-                crs="EPSG:4326",
-                geometry=[wkt.loads(boundary_wkt)]
-            )
-            folium.GeoJson(
-                boundary_gdf.to_json(),
-                name=f'<span style="color:#444444;">📍 {boundary_name} Boundary</span>',
-                style_function=lambda x: {
-                    "fillColor": "#ffffff00",
-                    "color": "#444444",
-                    "weight": 3,
-                    "fillOpacity": 0.0,
-                },
-            ).add_to(map_obj)
+        add_region_boundary_layers(
+            map_obj,
+            region_boundary_df=region_boundary_df,
+            region_code=state_code,
+        )
 
         folium.LayerControl(collapsed=True).add_to(map_obj)
         st_folium(map_obj, width=None, height=600, returned_objects=[])

@@ -20,7 +20,7 @@ from analyses.pfas_downstream.queries import (
 )
 from core.data_loader import load_naics_dict
 from filters.industry import render_hierarchical_naics_selector
-from filters.region import get_region_boundary
+from filters.region import get_region_boundary, add_region_boundary_layers
 from filters.concentration import render_concentration_filter, apply_concentration_filter
 
 
@@ -483,34 +483,14 @@ def main(context: AnalysisContext) -> None:
             except Exception:
                 pass
             
-            # Add state + county boundaries (state first, then county on top)
-            boundary_layers = []
-            if state_boundary_df is not None and not state_boundary_df.empty:
-                boundary_layers.append(("State", state_boundary_df, "#000000"))
-            if county_boundary_df is not None and not county_boundary_df.empty:
-                boundary_layers.append(("County", county_boundary_df, "#666666"))
-
-            for region_type, bdf, color in boundary_layers:
-                try:
-                    boundary_wkt_val = bdf.iloc[0]["countyWKT"]
-                    boundary_name = bdf.iloc[0].get("countyName", region_type)
-                    boundary_gdf = gpd.GeoDataFrame(
-                        index=[0],
-                        crs="EPSG:4326",
-                        geometry=[wkt.loads(boundary_wkt_val)],
-                    )
-                    folium.GeoJson(
-                        boundary_gdf.to_json(),
-                        name=f'<span style="color:{color};">📍 {region_type}: {boundary_name}</span>',
-                        style_function=lambda _x, c=color: {
-                            "fillColor": "#ffffff00",
-                            "color": c,
-                            "weight": 3,
-                            "fillOpacity": 0.0,
-                        },
-                    ).add_to(map_obj)
-                except Exception as e:
-                    st.warning(f"Could not display {region_type.lower()} boundary: {e}")
+            add_region_boundary_layers(
+                map_obj,
+                state_boundary_df=state_boundary_df,
+                county_boundary_df=county_boundary_df,
+                region_boundary_df=region_boundary_df,
+                region_code=context.region_code,
+                warn_fn=st.warning,
+            )
             
             # Add samples layer (notebook-style: scaled radius + popup=True)
             if samples_gdf is not None and not samples_gdf.empty:

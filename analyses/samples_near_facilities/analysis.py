@@ -16,7 +16,7 @@ from analysis_registry import AnalysisContext
 from analyses.samples_near_facilities.queries import execute_nearby_analysis
 from core.data_loader import load_naics_dict
 from filters.industry import render_hierarchical_naics_selector
-from filters.region import get_region_boundary
+from filters.region import get_region_boundary, add_region_boundary_layers
 from filters.concentration import render_concentration_filter, apply_concentration_filter
 
 
@@ -290,39 +290,13 @@ def main(context: AnalysisContext) -> None:
                     except Exception:
                         pass
                     
-                    # Add state + county boundaries (state first, then county on top)
-                    boundary_layers = []
-                    if state_boundary_df is not None and not state_boundary_df.empty:
-                        boundary_layers.append(("State", state_boundary_df, "#000000"))
-                    if county_boundary_df is not None and not county_boundary_df.empty:
-                        boundary_layers.append(("County", county_boundary_df, "#666666"))
-
-                    # Fallback to the single region boundary if present
-                    if not boundary_layers and region_boundary_df is not None and not region_boundary_df.empty and query_region_code:
-                        region_code_len = len(str(query_region_code))
-                        if region_code_len == 5:
-                            boundary_layers.append(("County", region_boundary_df, "#666666"))
-                        else:
-                            boundary_layers.append(("State", region_boundary_df, "#000000"))
-
-                    for region_type, bdf, boundary_color in boundary_layers:
-                        boundary_wkt = bdf.iloc[0]["countyWKT"]
-                        boundary_name = bdf.iloc[0].get("countyName", region_type)
-                        boundary_gdf = gpd.GeoDataFrame(
-                            index=[0],
-                            crs="EPSG:4326",
-                            geometry=[wkt.loads(boundary_wkt)],
-                        )
-                        folium.GeoJson(
-                            boundary_gdf.to_json(),
-                            name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
-                            style_function=lambda _x, c=boundary_color: {
-                                "fillColor": "#ffffff00",
-                                "color": c,
-                                "weight": 3,
-                                "fillOpacity": 0.0,
-                            },
-                        ).add_to(map_obj)
+                    add_region_boundary_layers(
+                        map_obj,
+                        state_boundary_df=state_boundary_df,
+                        county_boundary_df=county_boundary_df,
+                        region_boundary_df=region_boundary_df,
+                        region_code=query_region_code,
+                    )
                     
                     # Add facilities (blue markers) - ensure popup has the full info (same as hover)
                     if "facility" in facilities_gdf.columns:

@@ -20,7 +20,7 @@ from analyses.pfas_upstream.queries import (
 )
 from filters.substance import get_available_substances_with_labels
 from filters.material import get_available_material_types_with_labels
-from filters.region import get_region_boundary
+from filters.region import get_region_boundary, add_region_boundary_layers
 from filters.concentration import render_concentration_filter, apply_concentration_filter
 
 
@@ -527,37 +527,13 @@ def main(context: AnalysisContext) -> None:
                 except Exception:
                     pass
             
-                boundary_layers = []
-                if state_boundary_df is not None and not state_boundary_df.empty:
-                    boundary_layers.append(("State", state_boundary_df, "#444444"))
-                if county_boundary_df is not None and not county_boundary_df.empty:
-                    boundary_layers.append(("County", county_boundary_df, "#666666"))
-
-                for region_type, bdf, boundary_color in boundary_layers:
-                    try:
-                        boundary_wkt = bdf.iloc[0]["countyWKT"]
-                        boundary_name = bdf.iloc[0].get("countyName", region_type)
-                        from shapely import wkt as shapely_wkt
-                        boundary_geom = shapely_wkt.loads(boundary_wkt)
-                        boundary_gdf = gpd.GeoDataFrame(
-                            [{"name": boundary_name, "geometry": boundary_geom}],
-                            crs="EPSG:4326",
-                        )
-                        boundary_gdf.explore(
-                            m=map_obj,
-                            name=f'<span style="color:{boundary_color};">📍 {region_type}: {boundary_name}</span>',
-                            color=boundary_color,
-                            style_kwds=dict(
-                                fillColor="none",
-                                weight=3,
-                                opacity=0.8,
-                                dashArray="5, 5",
-                            ),
-                            overlay=True,
-                            show=True,
-                        )
-                    except Exception as e:
-                        print(f"Error displaying {region_type.lower()} boundary: {e}")
+                add_region_boundary_layers(
+                    map_obj,
+                    state_boundary_df=state_boundary_df,
+                    county_boundary_df=county_boundary_df,
+                    region_boundary_df=region_boundary_df,
+                    region_code=context.region_code,
+                )
             
                 if flowlines_gdf is not None and not flowlines_gdf.empty:
                     flowlines_gdf.explore(
