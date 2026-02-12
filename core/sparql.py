@@ -257,23 +257,36 @@ def build_county_region_filter(
     county_var: str = "?county",
 ) -> str:
     """
-    Build a SPARQL pattern to filter by county within a state.
+    Build a SPARQL pattern to filter by region (state or county).
 
-    Used when filtering facilities by the county they're connected to.
+    Used when filtering facilities by the administrative region they're connected to.
 
     Args:
-        region_code: 2-digit state FIPS code (e.g. "23" for Maine).
-        county_var: SPARQL variable name for the county (default: ?county).
+        region_code: FIPS code - either 2-digit state (e.g. "23") or 5-digit county (e.g. "23011").
+        county_var: SPARQL variable name for the region (default: ?county).
 
     Returns:
         SPARQL fragment or empty string if no valid code.
+        - 2-digit: filters counties (AR2) within the state
+        - 5-digit: filters subdivisions (AR3) within the specific county
     """
     if not region_code:
         return ""
     code = str(region_code).strip()
-    if len(code) <= 5:
-        return f"""{county_var} rdf:type kwg-ont:AdministrativeRegion_2 ;
-               kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."""
+    if not code:
+        return ""
+    if len(code) == 5:
+        # County code: use AdministrativeRegion_3 with transitive administrativePartOf+
+        return (
+            f"{county_var} rdf:type kwg-ont:AdministrativeRegion_3 ;\n"
+            f"               kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
+        )
+    if len(code) == 2:
+        # State code: use AdministrativeRegion_2
+        return (
+            f"{county_var} rdf:type kwg-ont:AdministrativeRegion_2 ;\n"
+            f"               kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."
+        )
     return ""
 
 

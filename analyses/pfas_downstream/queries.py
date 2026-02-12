@@ -14,7 +14,6 @@ from core.sparql import (
     ENDPOINT_URLS,
     parse_sparql_results,
     post_sparql_with_debug,
-    state_code_from_region,
     build_county_region_filter,
     build_ar3_region_filter,
     build_facility_values,
@@ -47,8 +46,7 @@ def execute_downstream_facilities_query(
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 1: Find facilities by NAICS industry type in a region."""
     industry_filter = _build_industry_filter(naics_code)
-    facilities_region_code = state_code_from_region(region_code)
-    region_filter = build_county_region_filter(facilities_region_code, county_var="?facCounty")
+    region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
     if not industry_filter:
         return pd.DataFrame(), "Industry type is required for downstream tracing", {"error": "No industry selected"}
@@ -94,8 +92,7 @@ def execute_downstream_streams_query(
 
     facility_values = build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
-    facilities_region_code = state_code_from_region(region_code)
-    region_filter = build_county_region_filter(facilities_region_code, county_var="?facCounty")
+    region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
     if facility_values:
         industry_filter = ""
@@ -118,8 +115,8 @@ PREFIX owl: <http://www.w3.org/2002/07/owl#>
 
 SELECT DISTINCT ?downstream_flowline ?dsflWKT ?fl_type ?streamName
 WHERE {{
-    {{SELECT ?s2neighbor WHERE {{
-        ?s2neighbor kwg-ont:sfContains ?facility.
+    {{SELECT ?s2 WHERE {{
+        ?s2 spatial:connectedTo ?facility.
         {facility_values}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
@@ -164,8 +161,7 @@ def execute_downstream_samples_query(
     facility_values = build_facility_values(facility_uris)
     industry_filter = _build_industry_filter(naics_code)
     sample_region_filter = build_ar3_region_filter(region_code, ar3_var="?ar3")
-    facilities_region_code = state_code_from_region(region_code)
-    facility_region_filter = build_county_region_filter(facilities_region_code, county_var="?facCounty")
+    facility_region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
     if facility_values:
         industry_filter = ""
@@ -200,7 +196,7 @@ SELECT DISTINCT ?samplePoint ?spWKT ?sample
     (GROUP_CONCAT(DISTINCT ?subVal; separator=" <br> ") as ?results)
 WHERE {{
     {{ SELECT DISTINCT ?s2cell WHERE {{
-        ?s2neighbor kwg-ont:sfContains ?facility.
+        ?s2origin spatial:connectedTo ?facility.
         {facility_values}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
@@ -211,7 +207,7 @@ WHERE {{
             rdfs:label ?industryName.
         {industry_filter}
 
-        ?s2 kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
+        ?s2origin kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
         ?s2neighbor rdf:type kwg-ont:S2Cell_Level13;
               spatial:connectedTo ?upstream_flowline.
 
