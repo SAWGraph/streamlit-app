@@ -47,7 +47,7 @@ def _fetch_comptox_label(dsstox_id: str) -> Optional[str]:
         response = requests.get(
             COMPTox_DSS_TOX_ENDPOINT,
             params={"id": dsstox_id},
-            timeout=10
+            timeout=30
         )
         if response.status_code != 200:
             return None
@@ -71,7 +71,7 @@ def _fetch_wqp_label(characteristic_id: str) -> Optional[str]:
             WQP_CHARACTERISTIC_ENDPOINT,
             params={"characteristicID": characteristic_id},
             headers={"Accept": "application/json"},
-            timeout=10
+            timeout=30
         )
         if response.status_code != 200:
             return None

@@ -1,7 +1,7 @@
 """
 PFAS Downstream Tracing Query Functions
 Implements a 3-step pipeline:
-    Step 1: Find facilities by NAICS industry type in a region 
+    Step 1: Find facilities by NAICS industry type in a region
     Step 2: Find downstream flowlines/streams from facilities
     Step 3: Find samplepoints in downstream S2 cells
 """
@@ -9,116 +9,49 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
-import requests
 
-from core.sparql import ENDPOINT_URLS, parse_sparql_results
-
-
-def _post_sparql(endpoint: str, query: str, timeout: int) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
-    headers = {
-        "Accept": "application/sparql-results+json",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    debug_info: Dict[str, Any] = {
-        "endpoint": endpoint,
-        "query_length": len(query),
-        "query": query,
-        "timeout_sec": timeout,
-    }
-    try:
-        response = requests.post(endpoint, data={"query": query}, headers=headers, timeout=timeout)
-        debug_info["response_status"] = response.status_code
-        debug_info["response_text_snippet"] = response.text[:500]
-        if response.status_code != 200:
-            return None, f"Error {response.status_code}: {response.text}", debug_info
-        return response.json(), None, debug_info
-    except requests.exceptions.RequestException as e:
-        debug_info["exception"] = str(e)
-        return None, f"Network error: {str(e)}", debug_info
-    except Exception as e:
-        debug_info["exception"] = str(e)
-        return None, f"Error: {str(e)}", debug_info
+from core.sparql import (
+    ENDPOINT_URLS,
+    parse_sparql_results,
+    post_sparql_with_debug,
+    build_county_region_filter,
+    build_ar3_region_filter,
+    build_facility_values,
+    concentration_filter_sparql,
+)
+from core.naics_utils import normalize_naics_codes, build_naics_values_and_hierarchy
 
 
-def _build_industry_filter(naics_code: Optional[str]) -> str:
-    if not naics_code:
-        return ""
-    code = str(naics_code).strip()
-    if len(code) > 4:
-        return f"VALUES ?industryCode {{naics:NAICS-{code}}}."
-    else:
-        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}."
+def _build_industry_filter(naics_code: Optional[str]) -> tuple[str, str]:
+    """
+    Build NAICS VALUES clause and hierarchy for downstream queries.
 
+    Supports all NAICS levels:
+      - 2 digits (sector): builds full hierarchy chain
+      - 3 digits (subsector): builds hierarchy to subsector
+      - 4 digits (group): binds ?industryGroup directly
+      - 5-6 digits (industry): binds ?industryCode directly
 
-def _build_region_filter(region_code: Optional[str], county_var: str = "?county") -> str:
-    if not region_code:
-        return ""
-    code = str(region_code).strip()
-    if len(code) <= 5:
-        return f"""{county_var} rdf:type kwg-ont:AdministrativeRegion_2 ;
-                   kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."""
-    return ""
-
-
-def _state_code_from_region(region_code: Optional[str]) -> Optional[str]:
-    if not region_code:
-        return None
-    code = str(region_code).strip()
-    if not code:
-        return None
-    if len(code) == 5:
-        return code[:2]
-    if len(code) <= 2:
-        return code
-    return None
-
-
-def _build_ar3_region_filter(region_code: Optional[str], ar3_var: str = "?ar3") -> str:
-    if not region_code:
-        return ""
-    code = str(region_code).strip()
-    if not code:
-        return ""
-    if len(code) > 5:
-        return f"VALUES {ar3_var} {{ <https://datacommons.org/browser/geoId/{code}> }} ."
-    return (
-        f"{ar3_var} rdf:type kwg-ont:AdministrativeRegion_3 ; "
-        f"kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
-    )
-
-
-def _build_facility_values(facility_uris: Optional[List[str]]) -> str:
-    if not facility_uris:
-        return ""
-    cleaned: List[str] = []
-    for uri in facility_uris:
-        if not uri:
-            continue
-        u = str(uri).strip()
-        if not u:
-            continue
-        if u.startswith("<") and u.endswith(">"):
-            cleaned.append(u)
-        elif u.startswith("http://") or u.startswith("https://"):
-            cleaned.append(f"<{u}>")
-    if not cleaned:
-        return ""
-    return f"VALUES ?facility {{ {' '.join(cleaned)} }}."
+    Returns:
+        (industry_values, industry_hierarchy) tuple
+    """
+    codes = normalize_naics_codes(naics_code)
+    if not codes:
+        return "", ""
+    return build_naics_values_and_hierarchy(codes[0])
 
 
 def execute_downstream_facilities_query(
     naics_code: Optional[str],
     region_code: Optional[str],
-    timeout: int = 180,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 1: Find facilities by NAICS industry type in a region."""
-    industry_filter = _build_industry_filter(naics_code)
-    facilities_region_code = _state_code_from_region(region_code)
-    region_filter = _build_region_filter(facilities_region_code, county_var="?facCounty")
-    
-    if not industry_filter:
+    industry_values, industry_hierarchy = _build_industry_filter(naics_code)
+    region_filter = build_county_region_filter(region_code, county_var="?facCounty")
+
+    if not industry_values:
         return pd.DataFrame(), "Industry type is required for downstream tracing", {"error": "No industry selected"}
-    
+
     query = f"""
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -139,10 +72,11 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     ?industryCode a naics:NAICS-IndustryCode;
         fio:subcodeOf ?industryGroup ;
         rdfs:label ?industryName.
-    {industry_filter}
+    {industry_hierarchy}
+    {industry_values}
 }}
 """
-    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    results_json, error, debug_info = post_sparql_with_debug("federation", query)
     if error or not results_json:
         return pd.DataFrame(), error, debug_info
     df = parse_sparql_results(results_json)
@@ -153,23 +87,22 @@ def execute_downstream_streams_query(
     naics_code: Optional[str],
     region_code: Optional[str],
     facility_uris: Optional[List[str]] = None,
-    timeout: int = 180,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 2: Find downstream flowlines/streams from facilities."""
     if facility_uris is not None and not isinstance(facility_uris, list):
         facility_uris = None
 
-    facility_values = _build_facility_values(facility_uris)
-    industry_filter = _build_industry_filter(naics_code)
-    facilities_region_code = _state_code_from_region(region_code)
-    region_filter = _build_region_filter(facilities_region_code, county_var="?facCounty")
+    facility_values_clause = build_facility_values(facility_uris)
+    industry_values, industry_hierarchy = _build_industry_filter(naics_code)
+    region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
-    if facility_values:
-        industry_filter = ""
+    if facility_values_clause:
+        industry_values = ""
+        industry_hierarchy = ""
         region_filter = ""
-    elif not industry_filter:
+    elif not industry_values:
         return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
-    
+
     query = f"""
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -185,9 +118,9 @@ PREFIX owl: <http://www.w3.org/2002/07/owl#>
 
 SELECT DISTINCT ?downstream_flowline ?dsflWKT ?fl_type ?streamName
 WHERE {{
-    {{SELECT ?s2neighbor WHERE {{
-        ?s2neighbor kwg-ont:sfContains ?facility.
-        {facility_values}
+    {{SELECT ?s2 WHERE {{
+        ?s2 spatial:connectedTo ?facility.
+        {facility_values_clause}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
             spatial:connectedTo ?facCounty.
@@ -195,9 +128,10 @@ WHERE {{
         ?industryCode a naics:NAICS-IndustryCode;
             fio:subcodeOf ?industryGroup ;
             rdfs:label ?industryName.
-        {industry_filter}
+        {industry_hierarchy}
+        {industry_values}
     }}}}
-    
+
     ?s2 kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
     ?s2neighbor rdf:type kwg-ont:S2Cell_Level13;
               spatial:connectedTo ?upstream_flowline.
@@ -209,7 +143,7 @@ WHERE {{
     OPTIONAL {{?downstream_flowline rdfs:label ?streamName}}
 }}
 """
-    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    results_json, error, debug_info = post_sparql_with_debug("federation", query)
     if error or not results_json:
         return pd.DataFrame(), error, debug_info
     df = parse_sparql_results(results_json)
@@ -223,36 +157,25 @@ def execute_downstream_samples_query(
     min_conc: float = 0.0,
     max_conc: float = 500.0,
     include_nondetects: bool = False,
-    timeout: int = 300,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 3: Find contaminated samples downstream of facilities."""
     if facility_uris is not None and not isinstance(facility_uris, list):
         facility_uris = None
 
-    facility_values = _build_facility_values(facility_uris)
-    industry_filter = _build_industry_filter(naics_code)
-    sample_region_filter = _build_ar3_region_filter(region_code, ar3_var="?ar3")
-    facilities_region_code = _state_code_from_region(region_code)
-    facility_region_filter = _build_region_filter(facilities_region_code, county_var="?facCounty")
+    facility_values_clause = build_facility_values(facility_uris)
+    industry_values, industry_hierarchy = _build_industry_filter(naics_code)
+    sample_region_filter = build_ar3_region_filter(region_code, ar3_var="?ar3")
+    facility_region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
-    if facility_values:
-        industry_filter = ""
-        region_filter = ""
-    elif not industry_filter:
+    if facility_values_clause:
+        industry_values = ""
+        industry_hierarchy = ""
+        facility_region_filter = ""
+    elif not industry_values:
         return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
-    
-    concentration_filter = (
-        f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {float(min_conc)} && ?numericValue <= {float(max_conc)}) )"
-        if include_nondetects
-        else "\n".join([
-            "FILTER(!?isNonDetect)",
-            "FILTER(BOUND(?numericValue))",
-            "FILTER(?numericValue > 0)",
-            f"FILTER (?numericValue >= {float(min_conc)})",
-            f"FILTER (?numericValue <= {float(max_conc)})",
-        ])
-    )
-    
+
+    conc_filter = concentration_filter_sparql(min_conc, max_conc, include_nondetects)
+
     query = f"""
 PREFIX dcterms: <http://purl.org/dc/terms/>
 PREFIX qudt: <http://qudt.org/schema/qudt/>
@@ -270,16 +193,16 @@ PREFIX hyf: <https://www.opengis.net/def/schema/hy_features/hyf/>
 PREFIX owl: <http://www.w3.org/2002/07/owl#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
-SELECT DISTINCT ?samplePoint ?spWKT ?sample 
-    (GROUP_CONCAT(DISTINCT ?sampleId; separator="; ") as ?samples) 
-    (COUNT(DISTINCT ?subVal) as ?resultCount) 
-    (MAX(?numericValue) as ?Max) 
-    ?unit 
+SELECT DISTINCT ?samplePoint ?spWKT ?sample
+    (GROUP_CONCAT(DISTINCT ?sampleId; separator="; ") as ?samples)
+    (COUNT(DISTINCT ?subVal) as ?resultCount)
+    (MAX(?numericValue) as ?Max)
+    ?unit
     (GROUP_CONCAT(DISTINCT ?subVal; separator=" <br> ") as ?results)
 WHERE {{
     {{ SELECT DISTINCT ?s2cell WHERE {{
-        ?s2neighbor kwg-ont:sfContains ?facility.
-        {facility_values}
+        ?s2origin spatial:connectedTo ?facility.
+        {facility_values_clause}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
             spatial:connectedTo ?facCounty.
@@ -287,9 +210,10 @@ WHERE {{
         ?industryCode a naics:NAICS-IndustryCode;
             fio:subcodeOf ?industryGroup ;
             rdfs:label ?industryName.
-        {industry_filter}
-        
-        ?s2 kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
+        {industry_hierarchy}
+        {industry_values}
+
+        ?s2origin kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
         ?s2neighbor rdf:type kwg-ont:S2Cell_Level13;
               spatial:connectedTo ?upstream_flowline.
 
@@ -327,30 +251,13 @@ WHERE {{
         COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value))
       ) as ?numericValue
     )
-    {concentration_filter}
+    {conc_filter}
     BIND((CONCAT(?substance, ": ", str(?result_value) , " ", ?unit) ) as ?subVal)
 
 }} GROUP BY ?samplePoint ?spWKT ?sample ?unit
 """
-    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    results_json, error, debug_info = post_sparql_with_debug("federation", query)
     if error or not results_json:
         return pd.DataFrame(), error, debug_info
     df = parse_sparql_results(results_json)
     return df, None, debug_info
-
-
-def convertS2ListToQueryString(s2_list: list[str]) -> str:
-    """Convert S2 cell URIs to SPARQL VALUES string format."""
-    s2_list_formatted = []
-    for s2 in s2_list:
-        if s2.startswith("http://stko-kwg.geog.ucsb.edu/lod/resource/"):
-            s2_list_formatted.append(s2.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
-        elif s2.startswith("https://stko-kwg.geog.ucsb.edu/lod/resource/"):
-            s2_list_formatted.append(s2.replace("https://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
-        elif s2.startswith("kwgr:"):
-            s2_list_formatted.append(s2)
-        elif s2.startswith("http://") or s2.startswith("https://"):
-            s2_list_formatted.append(f"<{s2}>")
-        else:
-            s2_list_formatted.append(s2)
-    return " ".join(s2_list_formatted)

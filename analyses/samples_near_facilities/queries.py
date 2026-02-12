@@ -9,83 +9,18 @@ data from multiple knowledge graphs in one query.
 from __future__ import annotations
 
 import pandas as pd
-import requests
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-from core.sparql import ENDPOINT_URLS, parse_sparql_results
+from core.sparql import (
+    ENDPOINT_URLS,
+    parse_sparql_results,
+    post_sparql_with_debug,
+    concentration_filter_sparql,
+)
+from core.naics_utils import normalize_naics_codes, build_naics_values_and_hierarchy
 
 # Alias for backward compatibility
 ENDPOINTS = ENDPOINT_URLS
-
-def _normalize_naics_codes(naics_code: str | list[str]) -> list[str]:
-    if isinstance(naics_code, (list, tuple, set)):
-        codes = [str(code).strip() for code in naics_code if str(code).strip()]
-    else:
-        codes = [str(naics_code).strip()] if naics_code else []
-    return sorted(set(codes))
-
-
-def _build_industry_filter(naics_codes: list[str]) -> str:
-    if not naics_codes:
-        return ""
-
-    industry_codes = [code for code in naics_codes if len(code) > 4]
-    industry_groups = [code for code in naics_codes if len(code) <= 4]
-
-    def _values(values: list[str]) -> str:
-        return ", ".join(f"naics:NAICS-{value}" for value in values)
-
-    if industry_codes and industry_groups:
-        return (
-            f"FILTER(?industryCode IN ({_values(industry_codes)}) || "
-            f"?industryGroup IN ({_values(industry_groups)}))."
-        )
-    if industry_codes:
-        return f"FILTER(?industryCode IN ({_values(industry_codes)}))."
-    return f"FILTER(?industryGroup IN ({_values(industry_groups)}))."
-
-
-# parse_sparql_results is imported from core.sparql
-
-
-def get_pfas_industries() -> pd.DataFrame:
-    """
-    Fetch PFAS-related industries from the KG.
-
-    Returns:
-        DataFrame with columns: industryCodeId, industryName, NAICS, industryGroup, industrySector
-    """
-    query = """
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX dcterms: <http://purl.org/dc/terms/>
-PREFIX fio: <http://w3id.org/fio/v1/fio#>
-PREFIX naics: <http://w3id.org/fio/v1/naics#>
-PREFIX fio-pfas:  <http://w3id.org/fio/v1/pfas#>
-
-SELECT DISTINCT ?industryCodeId ?industryName ?NAICS ?industryGroup ?industrySector
-WHERE {
-  ?pfasList fio:hasMember ?industryCode;
-            rdfs:subClassOf fio-pfas:IndustryCollectionByPFASContaminationConcern.
-  ?industryCode rdfs:label ?industryName;
-                fio:subcodeOf ?industryG.
-  OPTIONAL { ?industryCode dcterms:identifier ?industryCodeIdRaw. }
-  BIND(COALESCE(?industryCodeIdRaw, STRAFTER(STR(?industryCode), "NAICS-")) AS ?industryCodeId)
-  ?industryG rdf:type naics:NAICS-IndustryGroup;
-             rdfs:label ?industryGroup;
-             dcterms:identifier ?NAICS.
-  ?industryG fio:subcodeOf ?industryS.
-  ?industryS rdf:type naics:NAICS-IndustrySector;
-             rdfs:label ?industrySector.
-} ORDER BY ?industrySector
-"""
-    results = execute_sparql_query(ENDPOINTS["federation"], query, timeout=120)
-    df = parse_sparql_results(results)
-    if df.empty:
-        return pd.DataFrame(
-            columns=["industryCodeId", "industryName", "NAICS", "industryGroup", "industrySector"]
-        )
-    return df.dropna(subset=["NAICS"]).reset_index(drop=True)
 
 
 def _normalize_samples_df(samples_df: pd.DataFrame) -> pd.DataFrame:
@@ -113,78 +48,13 @@ def _normalize_samples_df(samples_df: pd.DataFrame) -> pd.DataFrame:
     return samples_df
 
 
-def execute_sparql_query(endpoint: str, query: str, method: str = 'POST', timeout: int = 180) -> Optional[dict]:
-    """Execute a SPARQL query and return JSON results"""
-    headers = {
-        'Accept': 'application/sparql-results+json',
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    
-    try:
-        if method == 'POST':
-            response = requests.post(endpoint, data={'query': query}, headers=headers, timeout=timeout)
-        else:
-            response = requests.get(endpoint, params={'query': query}, headers=headers, timeout=timeout)
-        
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"SPARQL query error: {e}")
-        return None
-
-
-def _build_industry_values_clause(naics_codes: list[str]) -> tuple[str, str]:
-    """
-    Build industry filtering clauses (notebook style), including correct NAICS level handling.
-
-    Returns:
-      (values_clause, hierarchy_clause)
-    - values_clause: VALUES ... restricting the appropriate NAICS node.
-    - hierarchy_clause: additional fio:subcodeOf joins needed for sector/subsector filtering.
-    """
-    if not naics_codes:
-        return "", ""
-
-    code = str(naics_codes[0]).strip()
-    if not code:
-        return "", ""
-
-    # NAICS levels:
-    # - 2 digits: Sector
-    # - 3 digits: Subsector
-    # - 4 digits: Industry Group
-    # - 5-6 digits: Industry Code
-    if len(code) > 4:
-        return f"VALUES ?industryCode {{naics:NAICS-{code}}}.", ""
-    if len(code) == 4:
-        return f"VALUES ?industryGroup {{naics:NAICS-{code}}}.", ""
-    if len(code) == 3:
-        return (
-            f"VALUES ?industrySubsector {{naics:NAICS-{code}}}.",
-            "?industryGroup fio:subcodeOf ?industrySubsector .",
-        )
-    if len(code) == 2:
-        return (
-            f"VALUES ?industrySector {{naics:NAICS-{code}}}.",
-            "\n".join(
-                [
-                    "?industryGroup fio:subcodeOf ?industrySubsector .",
-                    "?industrySubsector fio:subcodeOf ?industrySector .",
-                ]
-            ),
-        )
-
-    # Fallback: treat as group
-    return f"VALUES ?industryGroup {{naics:NAICS-{code}}}.", ""
-
-
 def execute_nearby_analysis(
     naics_code: str | list[str],
     region_code: Optional[str],
     min_concentration: float = 0.0,
     max_concentration: float = 500.0,
     include_nondetects: bool = False
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
     Execute the complete "Samples Near Facilities" analysis using separate queries
     matching the notebook approach (SAWGraph_Y3_Demo_NearbyFacilities.ipynb).
@@ -202,7 +72,7 @@ def execute_nearby_analysis(
     Returns:
         Tuple of (facilities_df, samples_df)
     """
-    naics_codes = _normalize_naics_codes(naics_code)
+    naics_codes = normalize_naics_codes(naics_code)
     industry_label = ", ".join(naics_codes) if naics_codes else "ALL industries"
     region_label = str(region_code).strip() if region_code else "ALL regions"
 
@@ -211,10 +81,15 @@ def execute_nearby_analysis(
     print(f"Concentration range: {min_concentration}-{max_concentration} ng/L")
     print(f"Include nondetects: {include_nondetects}")
     print(f"{'='*60}\n")
-    
+
     # Build industry filter using VALUES clause (notebook style)
-    industry_values, industry_hierarchy = _build_industry_values_clause(naics_codes)
-    
+    if naics_codes:
+        industry_values, industry_hierarchy = build_naics_values_and_hierarchy(
+            naics_codes[0]
+        )
+    else:
+        industry_values, industry_hierarchy = "", ""
+
     # Build region filter (optional).
     # IMPORTANT: filter on the facility-connected county (not S2 cells), so state + county behave correctly.
     # - state (2 digits): keep counties within the selected state
@@ -234,7 +109,7 @@ def execute_nearby_analysis(
         else:
             # Subdivision / other codes not currently supported for this analysis
             region_filter = ""
-    
+
     # =========================================================================
     # QUERY 1: Get facilities (matches notebook q2)
     # =========================================================================
@@ -263,28 +138,33 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     {industry_values}
 }}
 """
-    
+
     print("--- Query 1: Fetching facilities ---")
-    facilities_result = execute_sparql_query(ENDPOINTS['federation'], facilities_query, timeout=300)
-    facilities_df = parse_sparql_results(facilities_result)
-    
+    facilities_result, facilities_error, facilities_debug = post_sparql_with_debug(
+        "federation", facilities_query
+    )
+    facilities_df = parse_sparql_results(facilities_result) if facilities_result else pd.DataFrame()
+    facilities_debug.update({
+        "label": "Step 1: Facilities",
+        "error": facilities_error,
+        "row_count": len(facilities_df),
+    })
+
     if not facilities_df.empty:
         print(f"   > Found {len(facilities_df)} facilities")
     else:
         print("   > No facilities found")
-    
+
     # =========================================================================
     # QUERY 2: Get samples near facilities (matches notebook q5)
     # Uses subquery for S2 neighbors exactly as in notebook
     # =========================================================================
-    
+
     # Build concentration filter.
     # NOTE: Nondetect handling is expensive in the federated query; when include_nondetects=False
     # we omit the non-detect machinery entirely for performance.
     if include_nondetects:
-        concentration_filter = (
-            f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_concentration} && ?numericValue <= {max_concentration}) )"
-        )
+        concentration_filter = concentration_filter_sparql(min_concentration, max_concentration, True)
         nondetect_fragment = """
     OPTIONAL { ?result qudt:enumeratedValue ?enumDetected }
     # Non-detect detection: enumeratedValue OR explicit "non-detect" value (string/URI)
@@ -313,7 +193,7 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     # Detected-only fast path: numericValue derived from numericResult/result_value, no non-detect handling
     BIND(COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value)) as ?numericValue)
 """
-    
+
     samples_query = f"""
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -379,24 +259,30 @@ WHERE {{
 }} GROUP BY ?sp ?spName ?spWKT
 ORDER BY DESC(?max)
 """
-    
+
     print("--- Query 2: Fetching samples near facilities ---")
-    samples_result = execute_sparql_query(ENDPOINTS['federation'], samples_query, timeout=300)
-    samples_df = parse_sparql_results(samples_result)
-    
+    samples_result, samples_error, samples_debug = post_sparql_with_debug(
+        "federation", samples_query
+    )
+    samples_df = parse_sparql_results(samples_result) if samples_result else pd.DataFrame()
+
     if not samples_df.empty:
         print(f"   > Found {len(samples_df)} sample points")
         samples_df = _normalize_samples_df(samples_df)
     else:
         print("   > No samples found near facilities")
-    
+    samples_debug.update({
+        "label": "Step 2: Nearby Samples",
+        "error": samples_error,
+        "row_count": len(samples_df),
+    })
+
+    debug_info: Dict[str, Any] = {"queries": [facilities_debug, samples_debug]}
+
     print(f"\n{'='*60}")
     print(f"ANALYSIS COMPLETE")
     print(f"  - Facilities: {len(facilities_df)}")
     print(f"  - Sample points nearby: {len(samples_df)}")
     print(f"{'='*60}\n")
-    
-    return facilities_df, samples_df
 
-
-    return facilities_df, samples_df
+    return facilities_df, samples_df, debug_info

@@ -5,7 +5,7 @@ This is the single source of truth for SPARQL utilities.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 import pandas as pd
 import rdflib
 import requests
@@ -120,14 +120,292 @@ def convertToDataframe(_results) -> pd.DataFrame:
 
 
 # =============================================================================
+# QUERY BUILDING HELPERS
+# =============================================================================
+
+def sparql_values_uri(var_name: str, uri: Optional[str]) -> str:
+    """
+    Build a SPARQL VALUES clause for a single URI variable (e.g. ?substance, ?matType).
+
+    Args:
+        var_name: Variable name without '?' (e.g. 'substance', 'matType').
+        uri: Full URI string; if None or empty, returns empty string.
+
+    Returns:
+        "VALUES ?varName { <uri> }" or "".
+    """
+    if not uri or not uri.strip():
+        return ""
+    u = uri.strip()
+    if u.startswith("<") and u.endswith(">"):
+        return f"VALUES ?{var_name} {{ {u} }}"
+    return f"VALUES ?{var_name} {{ <{u}> }}"
+
+
+def region_pattern_sparql(region_code: str) -> str:
+    """
+    Build the SPARQL graph pattern for filtering by US state or county.
+
+    Uses ?regionURI. For long codes (e.g. FIPS county), binds single region URI.
+    For short codes (state), uses type and administrativePartOf+.
+
+    Args:
+        region_code: State FIPS (e.g. '23') or full FIPS (e.g. state+county).
+
+    Returns:
+        SPARQL fragment to inject into WHERE (no outer braces).
+    """
+    code = (region_code or "").strip()
+    if not code:
+        return ""
+    if len(code) > 5:
+        return f"VALUES ?regionURI {{ <https://datacommons.org/browser/geoId/{code}> }}"
+    return (
+        f"?regionURI rdf:type kwg-ont:AdministrativeRegion_3 ; "
+        f"kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
+    )
+
+
+def concentration_filter_sparql(
+    min_conc: float,
+    max_conc: float,
+    include_nondetects: bool,
+) -> str:
+    """
+    Build SPARQL FILTER clauses for concentration (assumes ?numericValue and ?isNonDetect).
+
+    Args:
+        min_conc: Minimum concentration (inclusive).
+        max_conc: Maximum concentration (inclusive).
+        include_nondetects: If True, allow non-detects and filter numeric range.
+
+    Returns:
+        Newline-joined FILTER lines.
+    """
+    if include_nondetects:
+        return (
+            f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_conc} && ?numericValue <= {max_conc}) )"
+        )
+    return "\n".join([
+        "FILTER(!?isNonDetect)",
+        "FILTER(BOUND(?numericValue))",
+        "FILTER(?numericValue > 0)",
+        f"FILTER (?numericValue >= {min_conc})",
+        f"FILTER (?numericValue <= {max_conc})",
+    ])
+
+
+def convert_s2_list_to_query_string(s2_list: list[str]) -> str:
+    """
+    Convert S2 cell URIs to SPARQL VALUES clause format.
+
+    S2 cells are identified by full URIs (e.g. from the knowledge graph).
+    For SPARQL queries using PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>,
+    this produces compact values like "kwgr:s2cell_level13_12345".
+
+    Use when building VALUES clauses for S2 cell lists (e.g. in upstream/downstream
+    tracing analyses).
+
+    Args:
+        s2_list: List of S2 cell URIs or prefixed identifiers (strings).
+
+    Returns:
+        Space-separated S2 cell identifiers for use in a SPARQL VALUES clause.
+    """
+    formatted = []
+    for s2 in s2_list:
+        if s2.startswith("http://stko-kwg.geog.ucsb.edu/lod/resource/"):
+            formatted.append(s2.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
+        elif s2.startswith("https://stko-kwg.geog.ucsb.edu/lod/resource/"):
+            formatted.append(s2.replace("https://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
+        elif s2.startswith("kwgr:"):
+            formatted.append(s2)
+        elif s2.startswith("http://") or s2.startswith("https://"):
+            formatted.append(f"<{s2}>")
+        else:
+            formatted.append(s2)
+    return " ".join(formatted)
+
+
+def state_code_from_region(region_code: Optional[str]) -> Optional[str]:
+    """
+    Extract the 2-digit state code from a region code.
+
+    Args:
+        region_code: FIPS region code (state or county).
+            - 2-digit: returned as-is (state code)
+            - 5-digit: first 2 digits returned (state from county)
+            - Other: None
+
+    Returns:
+        2-digit state code or None if not extractable.
+    """
+    if not region_code:
+        return None
+    code = str(region_code).strip()
+    if not code:
+        return None
+    if len(code) == 5:
+        return code[:2]
+    if len(code) <= 2:
+        return code
+    return None
+
+
+def build_county_region_filter(
+    region_code: Optional[str],
+    county_var: str = "?county",
+) -> str:
+    """
+    Build a SPARQL pattern to filter by region (state or county).
+
+    Used when filtering facilities by the administrative region they're connected to.
+
+    Args:
+        region_code: FIPS code - either 2-digit state (e.g. "23") or 5-digit county (e.g. "23011").
+        county_var: SPARQL variable name for the region (default: ?county).
+
+    Returns:
+        SPARQL fragment or empty string if no valid code.
+        - 2-digit: filters counties (AR2) within the state
+        - 5-digit: filters subdivisions (AR3) within the specific county
+    """
+    if not region_code:
+        return ""
+    code = str(region_code).strip()
+    if not code:
+        return ""
+    if len(code) == 5:
+        # County code: use AdministrativeRegion_3 with transitive administrativePartOf+
+        return (
+            f"{county_var} rdf:type kwg-ont:AdministrativeRegion_3 ;\n"
+            f"               kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
+        )
+    if len(code) == 2:
+        # State code: use AdministrativeRegion_2
+        return (
+            f"{county_var} rdf:type kwg-ont:AdministrativeRegion_2 ;\n"
+            f"               kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."
+        )
+    return ""
+
+
+def build_ar3_region_filter(
+    region_code: Optional[str],
+    ar3_var: str = "?ar3",
+) -> str:
+    """
+    Build a SPARQL pattern to filter by AR3 administrative regions.
+
+    AR3 regions are finer-grained administrative units (e.g. subdivisions).
+
+    Args:
+        region_code: FIPS region code.
+            - >5 digits: binds ar3_var to exact geoId URI
+            - <=5 digits: uses administrativePartOf+ to find AR3s within region
+        ar3_var: SPARQL variable name for the AR3 region (default: ?ar3).
+
+    Returns:
+        SPARQL fragment or empty string if no valid code.
+    """
+    if not region_code:
+        return ""
+    code = str(region_code).strip()
+    if not code:
+        return ""
+    if len(code) > 5:
+        return f"VALUES {ar3_var} {{ <https://datacommons.org/browser/geoId/{code}> }} ."
+    return (
+        f"{ar3_var} rdf:type kwg-ont:AdministrativeRegion_3 ; "
+        f"kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
+    )
+
+
+def build_facility_values(facility_uris: Optional[list[str]]) -> str:
+    """
+    Build a SPARQL VALUES clause for a list of facility URIs.
+
+    Handles various URI formats (bare URIs, angle-bracketed, http/https).
+
+    Args:
+        facility_uris: List of facility URI strings.
+
+    Returns:
+        SPARQL VALUES clause like "VALUES ?facility { <uri1> <uri2> }."
+        or empty string if no valid URIs.
+    """
+    if not facility_uris:
+        return ""
+    cleaned: list[str] = []
+    for uri in facility_uris:
+        if not uri:
+            continue
+        u = str(uri).strip()
+        if not u:
+            continue
+        if u.startswith("<") and u.endswith(">"):
+            cleaned.append(u)
+        elif u.startswith("http://") or u.startswith("https://"):
+            cleaned.append(f"<{u}>")
+    if not cleaned:
+        return ""
+    return f"VALUES ?facility {{ {' '.join(cleaned)} }}."
+
+
+# =============================================================================
 # QUERY EXECUTION FUNCTIONS
 # =============================================================================
+
+def post_sparql_with_debug(
+    endpoint_key: str,
+    query: str,
+    timeout: Optional[int] = None,
+) -> tuple[Optional[dict], Optional[str], dict]:
+    """
+    POST a SPARQL query to a known endpoint and return (json, error, debug_info).
+
+    Args:
+        endpoint_key: Key from ENDPOINT_URLS (e.g. 'federation').
+        query: SPARQL query string.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        (json_response, error_message, debug_dict). debug_dict has endpoint, query,
+        response_status, and optionally exception.
+    """
+    if endpoint_key not in ENDPOINT_URLS:
+        return None, f"Unknown endpoint: {endpoint_key}", {"endpoint": None, "query": query}
+    endpoint = ENDPOINT_URLS[endpoint_key]
+    headers = {
+        "Accept": "application/sparql-results+json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    debug: dict[str, Any] = {"endpoint": endpoint, "query": query}
+    try:
+        response = requests.post(
+            endpoint, data={"query": query}, headers=headers, timeout=timeout
+        )
+        debug["response_status"] = response.status_code
+        if response.status_code != 200:
+            return (
+                None,
+                f"Error {response.status_code}: {response.text[:500]}",
+                debug,
+            )
+        return response.json(), None, debug
+    except requests.exceptions.RequestException as e:
+        debug["exception"] = str(e)
+        return None, f"Network error: {str(e)}", debug
+    except Exception as e:
+        debug["exception"] = str(e)
+        return None, f"Error: {str(e)}", debug
+
 
 def execute_sparql_query(
     endpoint: str,
     query: str,
     method: str = 'POST',
-    timeout: int = 180
+    timeout: Optional[int] = None
 ) -> Optional[dict]:
     """
     Execute a SPARQL query and return JSON results.
@@ -138,7 +416,7 @@ def execute_sparql_query(
         endpoint: Full URL of the SPARQL endpoint, or key from ENDPOINT_URLS
         query: SPARQL query string
         method: HTTP method ('POST' or 'GET')
-        timeout: Request timeout in seconds
+        timeout: Request timeout in seconds (None = no timeout)
     
     Returns:
         JSON response dict, or None if query failed

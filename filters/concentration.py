@@ -280,5 +280,5 @@ SELECT (MAX(?numericValue) as ?max) WHERE {{
 }}
 """
 
-    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=120)
+    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=300)
     return _parse_max_value(results)

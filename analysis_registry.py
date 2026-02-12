@@ -106,7 +106,7 @@ def build_registry() -> dict[str, AnalysisSpec]:
             enabled=True,
             runner=downstream_main,
             region_config=RegionConfig(
-                state="optional",
+                state="required",
                 county="optional",
                 subdivision="optional",
                 availability_source="pfas",

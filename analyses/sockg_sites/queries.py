@@ -4,31 +4,11 @@ Fetch SOCKG locations and nearby facilities with optional state filtering.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 import pandas as pd
-import requests
 import streamlit as st
 
-from core.sparql import ENDPOINT_URLS, parse_sparql_results
-
-
-def _execute_sparql_query(query: str, timeout: int = 120) -> Optional[dict]:
-    headers = {
-        "Accept": "application/sparql-results+json",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    try:
-        response = requests.post(
-            ENDPOINT_URLS["federation"],
-            data={"query": query},
-            headers=headers,
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as exc:
-        print(f"SOCKG query error: {exc}")
-        return None
+from core.sparql import ENDPOINT_URLS, parse_sparql_results, post_sparql_with_debug
 
 
 def get_sockg_state_codes() -> pd.DataFrame:
@@ -58,7 +38,7 @@ SELECT DISTINCT ?ar1 WHERE {
     FILTER(STRSTARTS(STR(?ar1), "http://stko-kwg.geog.ucsb.edu")).
 }
 """
-    results = _execute_sparql_query(query)
+    results, _, _ = post_sparql_with_debug("federation", query)
     df = parse_sparql_results(results) if results else pd.DataFrame()
     if df.empty:
         return pd.DataFrame(columns=["ar1", "fips_code"])
@@ -69,7 +49,7 @@ SELECT DISTINCT ?ar1 WHERE {
     return df[["ar1", "fips_code"]].reset_index(drop=True)
 
 
-def get_sockg_locations(state_code: Optional[str] = None) -> pd.DataFrame:
+def get_sockg_locations(state_code: Optional[str] = None) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fetch SOCKG locations (optionally filtered by state).
 
@@ -103,14 +83,19 @@ WHERE {{
     {state_filter}
 }}
 """
-    results = _execute_sparql_query(query)
+    results, error, debug_info = post_sparql_with_debug("federation", query)
     df = parse_sparql_results(results) if results else pd.DataFrame()
+    debug_info.update({
+        "label": "Step 1: SOCKG Locations",
+        "error": error,
+        "row_count": len(df),
+    })
     if df.empty:
-        return pd.DataFrame(columns=["location", "locationGeometry", "locationId", "locationDescription"])
-    return df.reset_index(drop=True)
+        return pd.DataFrame(columns=["location", "locationGeometry", "locationId", "locationDescription"]), debug_info
+    return df.reset_index(drop=True), debug_info
 
 
-def get_sockg_facilities(state_code: Optional[str] = None) -> pd.DataFrame:
+def get_sockg_facilities(state_code: Optional[str] = None) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fetch facilities near SOCKG locations (optionally filtered by state).
 
@@ -172,8 +157,13 @@ WHERE {{
 }}
 GROUP BY ?facility ?facilityName ?facWKT ?PFASusing ?industrySector ?industrySubsector
 """
-    results = _execute_sparql_query(query)
+    results, error, debug_info = post_sparql_with_debug("federation", query)
     df = parse_sparql_results(results) if results else pd.DataFrame()
+    debug_info.update({
+        "label": "Step 2: SOCKG Nearby Facilities",
+        "error": error,
+        "row_count": len(df),
+    })
     if df.empty:
         return pd.DataFrame(
             columns=[
@@ -186,8 +176,8 @@ GROUP BY ?facility ?facilityName ?facWKT ?PFASusing ?industrySector ?industrySub
                 "industries",
                 "locations",
             ]
-        )
-    return df.reset_index(drop=True)
+        ), debug_info
+    return df.reset_index(drop=True), debug_info
 
 
 # Cached versions for use in app

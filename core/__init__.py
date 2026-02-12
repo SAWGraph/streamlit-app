@@ -5,10 +5,15 @@ Provides generic utilities for SPARQL operations and data loading.
 from core.sparql import (
     ENDPOINT_URLS,
     ENDPOINTS,
-    get_sparql_wrapper,
-    parse_sparql_results,
+    concentration_filter_sparql,
+    convert_s2_list_to_query_string,
     convertToDataframe,
     execute_sparql_query,
+    get_sparql_wrapper,
+    parse_sparql_results,
+    post_sparql_with_debug,
+    region_pattern_sparql,
+    sparql_values_uri,
     test_connection,
 )
 
@@ -26,10 +31,15 @@ __all__ = [
     # SPARQL
     "ENDPOINT_URLS",
     "ENDPOINTS",
-    "get_sparql_wrapper",
-    "parse_sparql_results",
+    "concentration_filter_sparql",
+    "convert_s2_list_to_query_string",
     "convertToDataframe",
     "execute_sparql_query",
+    "get_sparql_wrapper",
+    "parse_sparql_results",
+    "post_sparql_with_debug",
+    "region_pattern_sparql",
+    "sparql_values_uri",
     "test_connection",
     # Data Loading
     "load_fips_data",
