@@ -15,7 +15,7 @@ from core.sparql import ENDPOINT_URLS, parse_sparql_results
 from core.naics_utils import normalize_naics_codes, build_simple_naics_values
 
 
-def _post_sparql(endpoint: str, query: str, timeout: int) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
+def _post_sparql(endpoint: str, query: str, timeout: Optional[int] = None) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
     headers = {
         "Accept": "application/sparql-results+json",
         "Content-Type": "application/x-www-form-urlencoded",
@@ -24,7 +24,6 @@ def _post_sparql(endpoint: str, query: str, timeout: int) -> Tuple[Optional[dict
         "endpoint": endpoint,
         "query_length": len(query),
         "query": query,
-        "timeout_sec": timeout,
     }
     try:
         response = requests.post(endpoint, data={"query": query}, headers=headers, timeout=timeout)
@@ -118,7 +117,6 @@ def _build_facility_values(facility_uris: Optional[List[str]]) -> str:
 def execute_downstream_facilities_query(
     naics_code: Optional[str],
     region_code: Optional[str],
-    timeout: int = 180,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 1: Find facilities by NAICS industry type in a region."""
     industry_filter = _build_industry_filter(naics_code)
@@ -151,7 +149,7 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     {industry_filter}
 }}
 """
-    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query)
     if error or not results_json:
         return pd.DataFrame(), error, debug_info
     df = parse_sparql_results(results_json)
@@ -162,7 +160,6 @@ def execute_downstream_streams_query(
     naics_code: Optional[str],
     region_code: Optional[str],
     facility_uris: Optional[List[str]] = None,
-    timeout: int = 180,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 2: Find downstream flowlines/streams from facilities."""
     if facility_uris is not None and not isinstance(facility_uris, list):
@@ -218,7 +215,7 @@ WHERE {{
     OPTIONAL {{?downstream_flowline rdfs:label ?streamName}}
 }}
 """
-    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query)
     if error or not results_json:
         return pd.DataFrame(), error, debug_info
     df = parse_sparql_results(results_json)
@@ -232,7 +229,6 @@ def execute_downstream_samples_query(
     min_conc: float = 0.0,
     max_conc: float = 500.0,
     include_nondetects: bool = False,
-    timeout: int = 300,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 3: Find contaminated samples downstream of facilities."""
     if facility_uris is not None and not isinstance(facility_uris, list):
@@ -341,25 +337,10 @@ WHERE {{
 
 }} GROUP BY ?samplePoint ?spWKT ?sample ?unit
 """
-    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query, timeout=timeout)
+    results_json, error, debug_info = _post_sparql(ENDPOINT_URLS["federation"], query)
     if error or not results_json:
         return pd.DataFrame(), error, debug_info
     df = parse_sparql_results(results_json)
     return df, None, debug_info
 
 
-def convertS2ListToQueryString(s2_list: list[str]) -> str:
-    """Convert S2 cell URIs to SPARQL VALUES string format."""
-    s2_list_formatted = []
-    for s2 in s2_list:
-        if s2.startswith("http://stko-kwg.geog.ucsb.edu/lod/resource/"):
-            s2_list_formatted.append(s2.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
-        elif s2.startswith("https://stko-kwg.geog.ucsb.edu/lod/resource/"):
-            s2_list_formatted.append(s2.replace("https://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
-        elif s2.startswith("kwgr:"):
-            s2_list_formatted.append(s2)
-        elif s2.startswith("http://") or s2.startswith("https://"):
-            s2_list_formatted.append(f"<{s2}>")
-        else:
-            s2_list_formatted.append(s2)
-    return " ".join(s2_list_formatted)

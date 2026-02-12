@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 import requests
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from core.sparql import ENDPOINT_URLS, parse_sparql_results
 from core.naics_utils import normalize_naics_codes, build_naics_values_and_hierarchy
@@ -47,24 +47,36 @@ def _normalize_samples_df(samples_df: pd.DataFrame) -> pd.DataFrame:
     return samples_df
 
 
-def execute_sparql_query(endpoint: str, query: str, method: str = 'POST', timeout: int = 180) -> Optional[dict]:
-    """Execute a SPARQL query and return JSON results"""
+def execute_sparql_query(
+    endpoint: str,
+    query: str,
+    method: str = 'POST',
+) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
+    """Execute a SPARQL query and return JSON results with debug info."""
     headers = {
         'Accept': 'application/sparql-results+json',
         'Content-Type': 'application/x-www-form-urlencoded'
     }
-    
+    debug_info: Dict[str, Any] = {
+        "endpoint": endpoint,
+        "method": method.upper(),
+        "query": query,
+    }
+
     try:
-        if method == 'POST':
-            response = requests.post(endpoint, data={'query': query}, headers=headers, timeout=timeout)
+        if method.upper() == 'POST':
+            response = requests.post(endpoint, data={'query': query}, headers=headers, timeout=None)
         else:
-            response = requests.get(endpoint, params={'query': query}, headers=headers, timeout=timeout)
-        
-        response.raise_for_status()
-        return response.json()
+            response = requests.get(endpoint, params={'query': query}, headers=headers, timeout=None)
+
+        debug_info["response_status"] = response.status_code
+        if response.status_code != 200:
+            return None, f"Error {response.status_code}: {response.text}", debug_info
+
+        return response.json(), None, debug_info
     except Exception as e:
-        print(f"SPARQL query error: {e}")
-        return None
+        debug_info["exception"] = str(e)
+        return None, f"Error: {str(e)}", debug_info
 
 
 def execute_nearby_analysis(
@@ -73,7 +85,7 @@ def execute_nearby_analysis(
     min_concentration: float = 0.0,
     max_concentration: float = 500.0,
     include_nondetects: bool = False
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
     Execute the complete "Samples Near Facilities" analysis using separate queries
     matching the notebook approach (SAWGraph_Y3_Demo_NearbyFacilities.ipynb).
@@ -159,8 +171,15 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
 """
     
     print("--- Query 1: Fetching facilities ---")
-    facilities_result = execute_sparql_query(ENDPOINTS['federation'], facilities_query, timeout=300)
-    facilities_df = parse_sparql_results(facilities_result)
+    facilities_result, facilities_error, facilities_debug = execute_sparql_query(
+        ENDPOINTS['federation'], facilities_query
+    )
+    facilities_df = parse_sparql_results(facilities_result) if facilities_result else pd.DataFrame()
+    facilities_debug.update({
+        "label": "Step 1: Facilities",
+        "error": facilities_error,
+        "row_count": len(facilities_df),
+    })
     
     if not facilities_df.empty:
         print(f"   > Found {len(facilities_df)} facilities")
@@ -275,14 +294,23 @@ ORDER BY DESC(?max)
 """
     
     print("--- Query 2: Fetching samples near facilities ---")
-    samples_result = execute_sparql_query(ENDPOINTS['federation'], samples_query, timeout=300)
-    samples_df = parse_sparql_results(samples_result)
+    samples_result, samples_error, samples_debug = execute_sparql_query(
+        ENDPOINTS['federation'], samples_query
+    )
+    samples_df = parse_sparql_results(samples_result) if samples_result else pd.DataFrame()
     
     if not samples_df.empty:
         print(f"   > Found {len(samples_df)} sample points")
         samples_df = _normalize_samples_df(samples_df)
     else:
         print("   > No samples found near facilities")
+    samples_debug.update({
+        "label": "Step 2: Nearby Samples",
+        "error": samples_error,
+        "row_count": len(samples_df),
+    })
+
+    debug_info: Dict[str, Any] = {"queries": [facilities_debug, samples_debug]}
     
     print(f"\n{'='*60}")
     print(f"ANALYSIS COMPLETE")
@@ -290,7 +318,4 @@ ORDER BY DESC(?max)
     print(f"  - Sample points nearby: {len(samples_df)}")
     print(f"{'='*60}\n")
     
-    return facilities_df, samples_df
-
-
-    return facilities_df, samples_df
+    return facilities_df, samples_df, debug_info

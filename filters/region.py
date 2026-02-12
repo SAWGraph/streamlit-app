@@ -103,7 +103,7 @@ SELECT DISTINCT ?ar1 WHERE {
 FILTER(STRSTARTS(STR(?ar1), "http://stko-kwg.geog.ucsb.edu/lod/resource/administrativeRegion.USA.")).
 }
 """
-    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=120)
+    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=300)
     if not results:
         return pd.DataFrame(columns=['ar1', 'fips_code'])
 
@@ -155,7 +155,7 @@ FILTER(STRSTARTS(STR(?ar2), "http://stko-kwg.geog.ucsb.edu")).
 }}
 """
 
-    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=120)
+    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=300)
     if not results:
         return pd.DataFrame(columns=['ar2', 'fips_code'])
 
@@ -204,7 +204,7 @@ SELECT DISTINCT ?ar3 WHERE {{
 }}
 """
 
-    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=120)
+    results = execute_sparql_query(ENDPOINT_URLS["federation"], query, timeout=300)
     if not results:
         return pd.DataFrame(columns=['ar3', 'fips_code'])
 
@@ -259,7 +259,7 @@ SELECT * WHERE {{
                 "Accept": "application/sparql-results+json",
                 "Content-Type": "application/x-www-form-urlencoded"
             },
-            timeout=10
+            timeout=60
         )
 
         if response.status_code == 200:
@@ -458,8 +458,8 @@ def render_region_selector(
         state_options = [default_option] + available_state_options + unavailable_state_options
 
         def on_state_change():
-            selected = st.session_state.state_selector
-            if selected.startswith("✗ "):
+            selected = st.session_state.get("state_selector", default_option)
+            if selected and selected.startswith("✗ "):
                 rejected_state = selected.replace("✗ ", "")
                 source_name = "SOCKG" if config.availability_source == "sockg" else "PFAS"
                 st.session_state.state_rejected_msg = f"❌ {rejected_state} has no {source_name} data. Please select a state with ✓"
@@ -521,8 +521,8 @@ def render_region_selector(
             )
 
             def on_county_change():
-                selected = st.session_state.county_selector
-                if selected.startswith("✗ "):
+                selected = st.session_state.get("county_selector", "-- Select a County --")
+                if selected and selected.startswith("✗ "):
                     rejected_county = selected.replace("✗ ", "")
                     st.session_state.county_rejected_msg = f"❌ {rejected_county} has no data. Please select a county with ✓"
                     st.session_state.county_selector = "-- Select a County --"
@@ -588,8 +588,8 @@ def render_region_selector(
             )
 
             def on_subdivision_change():
-                selected = st.session_state.subdivision_selector
-                if selected.startswith("✗ "):
+                selected = st.session_state.get("subdivision_selector", "-- All Subdivisions --")
+                if selected and selected.startswith("✗ "):
                     rejected_subdivision = selected.replace("✗ ", "")
                     st.session_state.subdivision_rejected_msg = f"❌ {rejected_subdivision} has no data. Please select a subdivision with ✓"
                     st.session_state.subdivision_selector = "-- All Subdivisions --"

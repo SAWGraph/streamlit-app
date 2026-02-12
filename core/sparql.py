@@ -120,6 +120,42 @@ def convertToDataframe(_results) -> pd.DataFrame:
 
 
 # =============================================================================
+# QUERY BUILDING HELPERS
+# =============================================================================
+
+def convert_s2_list_to_query_string(s2_list: list[str]) -> str:
+    """
+    Convert S2 cell URIs to SPARQL VALUES clause format.
+
+    S2 cells are identified by full URIs (e.g. from the knowledge graph).
+    For SPARQL queries using PREFIX kwgr: <http://stko-kwg.geog.ucsb.edu/lod/resource/>,
+    this produces compact values like "kwgr:s2cell_level13_12345".
+
+    Use when building VALUES clauses for S2 cell lists (e.g. in upstream/downstream
+    tracing analyses).
+
+    Args:
+        s2_list: List of S2 cell URIs or prefixed identifiers (strings).
+
+    Returns:
+        Space-separated S2 cell identifiers for use in a SPARQL VALUES clause.
+    """
+    formatted = []
+    for s2 in s2_list:
+        if s2.startswith("http://stko-kwg.geog.ucsb.edu/lod/resource/"):
+            formatted.append(s2.replace("http://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
+        elif s2.startswith("https://stko-kwg.geog.ucsb.edu/lod/resource/"):
+            formatted.append(s2.replace("https://stko-kwg.geog.ucsb.edu/lod/resource/", "kwgr:"))
+        elif s2.startswith("kwgr:"):
+            formatted.append(s2)
+        elif s2.startswith("http://") or s2.startswith("https://"):
+            formatted.append(f"<{s2}>")
+        else:
+            formatted.append(s2)
+    return " ".join(formatted)
+
+
+# =============================================================================
 # QUERY EXECUTION FUNCTIONS
 # =============================================================================
 
@@ -127,7 +163,7 @@ def execute_sparql_query(
     endpoint: str,
     query: str,
     method: str = 'POST',
-    timeout: int = 180
+    timeout: Optional[int] = None
 ) -> Optional[dict]:
     """
     Execute a SPARQL query and return JSON results.
@@ -138,7 +174,7 @@ def execute_sparql_query(
         endpoint: Full URL of the SPARQL endpoint, or key from ENDPOINT_URLS
         query: SPARQL query string
         method: HTTP method ('POST' or 'GET')
-        timeout: Request timeout in seconds
+        timeout: Request timeout in seconds (None = no timeout)
     
     Returns:
         JSON response dict, or None if query failed

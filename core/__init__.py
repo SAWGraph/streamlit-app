@@ -8,6 +8,7 @@ from core.sparql import (
     get_sparql_wrapper,
     parse_sparql_results,
     convertToDataframe,
+    convert_s2_list_to_query_string,
     execute_sparql_query,
     test_connection,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "convertToDataframe",
     "execute_sparql_query",
     "test_connection",
+    "convert_s2_list_to_query_string",
     # Data Loading
     "load_fips_data",
     "load_substances_data",

@@ -6,390 +6,221 @@ from __future__ import annotations
 
 import streamlit as st
 import pandas as pd
-import folium
-import math
 from streamlit_folium import st_folium
-import geopandas as gpd
-from shapely import wkt
 
 from analysis_registry import AnalysisContext
 from analyses.samples_near_facilities.queries import execute_nearby_analysis
 from core.data_loader import load_naics_dict
 from filters.industry import render_hierarchical_naics_selector
-from filters.region import get_region_boundary, add_region_boundary_layers
 from filters.concentration import render_concentration_filter, apply_concentration_filter
+
+# Shared components
+from core.boundary import fetch_boundaries
+from core.geometry import create_geodataframe
+from components.parameter_display import render_parameter_table
+from components.result_display import render_metrics_row, render_data_expander, clean_unit_encoding
+from components.map_rendering import create_base_map, add_boundary_layers, add_point_layer, finalize_map, render_map_legend
+from components.execute_button import render_execute_button
+from components.analysis_state import AnalysisState, check_old_session_keys
+from components.step_execution import StepExecutor
+from components.query_debug import render_executed_queries
 
 
 def main(context: AnalysisContext) -> None:
     """Main function for Samples Near Facilities analysis"""
-    # Check for old session state keys and show migration notice
-    old_keys = ['q2_conc_min', 'q2_conc_max', 'q2_executed', 'q2_facilities', 'q2_samples']
-    if any(key in st.session_state for key in old_keys):
-        if 'migration_notice_shown' not in st.session_state:
-            st.warning("Session state has been reset. Please reconfigure your analysis parameters.")
-            st.session_state.migration_notice_shown = True
-    
+    check_old_session_keys(['q2_conc_min', 'q2_conc_max', 'q2_executed', 'q2_facilities', 'q2_samples'])
+
     st.markdown("""
     **What this analysis does:**
     - Find all facilities of a specific industry type (optionally filtered by region)
-    - Expand search to neighboring areas (
+    - Expand search to neighboring areas
     - Identify contaminated samples near those facilities
-    
-    **3-Step Process:** Find facilities → Expand to neighboring areas → Identify contaminated samples
-    
-    **Use case:** Determine if PFAS contamination exists near specific industries (e.g., sewage treatment, landfills, manufacturing)
+
+    **3-Step Process:** Find facilities -> Expand to neighboring areas -> Identify contaminated samples
+
+    **Use case:** Determine if PFAS contamination exists near specific industries
     """)
-    
-    # Initialize session state for analysis-specific params
-    analysis_key = context.analysis_key
-    executed_key = f"{analysis_key}_executed"
-    facilities_key = f"{analysis_key}_facilities"
-    samples_key = f"{analysis_key}_samples"
-    industry_key = f"{analysis_key}_industry"
-    region_code_key = f"{analysis_key}_region_code"
-    
-    # --- SIDEBAR PARAMETERS ---
-    # Industry selector using hierarchical tree dropdown (outside form for compatibility)
+
+    state = AnalysisState(context.analysis_key)
+    state.init_if_missing("executed_queries", [])
+
+    # === SIDEBAR PARAMETERS ===
     naics_dict = load_naics_dict()
-    st.sidebar.markdown("### 🏭 Industry Type")
+    st.sidebar.markdown("### Industry Type")
     st.sidebar.markdown("_Optional: leave empty to search all industries_")
     selected_naics_code = render_hierarchical_naics_selector(
         naics_dict=naics_dict,
-        key=f"{analysis_key}_industry_selector",
-        default_value=None,  # No default - allow unrestricted search
-        allow_empty=True,  # Allow empty selection for all industries
+        key=f"{context.analysis_key}_industry_selector",
+        default_value=None,
+        allow_empty=True,
     )
 
-    # Get display name for selected code
-    selected_industry_display = f"{selected_naics_code} - {naics_dict.get(selected_naics_code, 'Unknown')}" if selected_naics_code else "All Industries"
-
-    # Concentration filter (includes nondetects checkbox)
-    conc_filter = render_concentration_filter(analysis_key)
-    min_concentration = conc_filter.min_concentration
-    max_concentration = conc_filter.max_concentration
-
-    execute_button = st.sidebar.button(
-        "🔍 Execute Query",
-        type="primary",
-        use_container_width=True,
-        help="Execute the nearby facilities analysis (optionally filter by region and/or industry)",
+    selected_industry_display = (
+        f"{selected_naics_code} - {naics_dict.get(selected_naics_code, 'Unknown')}"
+        if selected_naics_code else "All Industries"
     )
 
-    # Execute the query when form is submitted
-    if execute_button:
-        # Apply pending concentration filter values
-        min_concentration, max_concentration, include_nondetects = apply_concentration_filter(analysis_key)
-        
-        region_boundary_df = None
-        state_boundary_df = None
-        county_boundary_df = None
+    conc_filter = render_concentration_filter(context.analysis_key)
+
+    execute_clicked = render_execute_button(help_text="Execute the nearby facilities analysis")
+
+    # === QUERY EXECUTION ===
+    if execute_clicked:
+        min_conc, max_conc, include_nondetects = apply_concentration_filter(context.analysis_key)
 
         st.markdown("---")
-        st.subheader("🚀 Query Execution")
-        prog_col1, prog_col2, prog_col3 = st.columns(3)
+        st.subheader("Query Execution")
 
-        with prog_col1:
-            with st.spinner("🔄 Step 1: Finding facilities..."):
-                facilities_df, samples_df = execute_nearby_analysis(
-                    naics_code=selected_naics_code,
-                    region_code=context.region_code,
-                    min_concentration=min_concentration,
-                    max_concentration=max_concentration,
-                    include_nondetects=include_nondetects
-                )
+        executor = StepExecutor(num_steps=3)
+        facilities_df = pd.DataFrame()
+        samples_df = pd.DataFrame()
+        executed_queries = []
+
+        with executor.step(1, "Finding facilities...") as step:
+            facilities_df, samples_df, debug_info = execute_nearby_analysis(
+                naics_code=selected_naics_code, region_code=context.region_code,
+                min_concentration=min_conc, max_concentration=max_conc,
+                include_nondetects=include_nondetects)
+            executed_queries = list((debug_info or {}).get("queries", []))
             if not facilities_df.empty:
-                st.success(f"✅ Step 1: Found {len(facilities_df)} facilities")
+                step.success(f"Step 1: Found {len(facilities_df)} facilities")
             else:
-                st.warning("⚠️ Step 1: No facilities found")
+                step.warning("Step 1: No facilities found")
 
-        with prog_col2:
-            st.success("✅ Step 2: Expanded to neighboring areas")
+        with executor.step(2, "Expanding to neighboring areas...") as step:
+            step.success("Step 2: Expanded to neighboring areas")
 
-        with prog_col3:
+        with executor.step(3, "Finding contaminated samples...") as step:
             if not samples_df.empty:
-                st.success(f"✅ Step 3: Found {len(samples_df)} contaminated samples")
+                step.success(f"Step 3: Found {len(samples_df)} contaminated samples")
             else:
-                st.info("ℹ️ Step 3: No contaminated samples found")
+                step.info("Step 3: No contaminated samples found")
 
-        # Fetch both state + county boundaries when available; county drawn on top.
-        state_boundary_df = (
-            get_region_boundary(context.selected_state_code) if context.selected_state_code else None
-        )
-        county_boundary_df = (
-            get_region_boundary(context.selected_county_code) if context.selected_county_code else None
-        )
-        region_boundary_df = (
-            county_boundary_df
-            if (county_boundary_df is not None and not county_boundary_df.empty)
-            else state_boundary_df
-        )
+        boundaries = fetch_boundaries(context.selected_state_code, context.selected_county_code)
 
-        params_data = [
-            {"Parameter": "Industry Type", "Value": selected_industry_display},
-            {"Parameter": "Geographic Region", "Value": context.region_display or "All Regions"},
-            {"Parameter": "Detected Concentration", "Value": f"{min_concentration} - {max_concentration} ng/L"},
-            {"Parameter": "Include nondetects", "Value": "Yes" if include_nondetects else "No"},
-        ]
-        params_df = pd.DataFrame(params_data)
+        state.set("executed_queries", executed_queries)
+        state.set_results({
+            "facilities_df": facilities_df, "samples_df": samples_df,
+            "industry_display": selected_industry_display, "boundaries": boundaries,
+            "params_data": [
+                {"Parameter": "Industry Type", "Value": selected_industry_display},
+                {"Parameter": "Geographic Region", "Value": context.region_display or "All Regions"},
+                {"Parameter": "Detected Concentration", "Value": f"{min_conc} - {max_conc} ng/L"},
+                {"Parameter": "Include nondetects", "Value": "Yes" if include_nondetects else "No"},
+            ],
+            "query_region_code": context.region_code,
+            "executed_queries": executed_queries,
+        })
 
-        # Store results in session state
-        st.session_state[facilities_key] = facilities_df
-        st.session_state[samples_key] = samples_df
-        st.session_state[industry_key] = selected_industry_display
-        st.session_state[region_code_key] = context.region_code
-        st.session_state[f"{analysis_key}_region_boundary_df"] = region_boundary_df
-        st.session_state[f"{analysis_key}_state_boundary_df"] = state_boundary_df
-        st.session_state[f"{analysis_key}_county_boundary_df"] = county_boundary_df
-        st.session_state[f"{analysis_key}_params_df"] = params_df
-        st.session_state[executed_key] = True
-    
-    # Display Results
-    if st.session_state.get(executed_key, False):
-        facilities_df = st.session_state.get(facilities_key, pd.DataFrame())
-        samples_df = st.session_state.get(samples_key, pd.DataFrame())
-        industry_display = st.session_state.get(industry_key, '')
-        region_boundary_df = st.session_state.get(f"{analysis_key}_region_boundary_df")
-        state_boundary_df = st.session_state.get(f"{analysis_key}_state_boundary_df")
-        county_boundary_df = st.session_state.get(f"{analysis_key}_county_boundary_df")
-        params_df = st.session_state.get(f"{analysis_key}_params_df")
-        query_region_code = st.session_state.get(region_code_key)
-        
+    render_executed_queries(state.get("executed_queries", []))
+
+    # === DISPLAY RESULTS ===
+    if state.has_results:
+        results = state.get_results()
+        facilities_df = results.get("facilities_df", pd.DataFrame())
+        samples_df = results.get("samples_df", pd.DataFrame())
+        industry_display = results.get("industry_display", "")
+        boundaries = results.get("boundaries", {})
+        params_data = results.get("params_data", [])
+        query_region_code = results.get("query_region_code")
+
         st.markdown("---")
-        if params_df is not None and not params_df.empty:
-            st.markdown("### 📋 Selected Parameters (from executed query)")
-            st.table(params_df)
-        st.markdown("### 🔬 Query Results")
-        
+        render_parameter_table(params_data)
+        st.markdown("### Query Results")
         st.markdown("---")
-        
+
         # Step 1: Facilities
         if not facilities_df.empty:
-            st.markdown("### 🏭 Step 1: Facilities")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Total Facilities", len(facilities_df))
-            with col2:
-                if 'industryName' in facilities_df.columns:
-                    st.metric("Industry Types", facilities_df['industryName'].nunique())
-            
-            with st.expander("📊 View Facilities Data"):
-                display_cols = [c for c in ['facilityName', 'industryName', 'facility'] if c in facilities_df.columns]
-                if display_cols:
-                    st.dataframe(facilities_df[display_cols], use_container_width=True)
-                else:
-                    st.dataframe(facilities_df, use_container_width=True)
-                
-                csv_facilities = facilities_df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Facilities CSV",
-                    data=csv_facilities,
-                    file_name=f"near_facilities_{query_region_code or 'all'}.csv",
-                    mime="text/csv",
-                    key=f"download_{analysis_key}_facilities"
-                )
-        
-        # Step 2: Contaminated Samples
+            st.markdown("### Step 1: Facilities")
+            metrics = [{"label": "Total Facilities", "value": len(facilities_df)}]
+            if 'industryName' in facilities_df.columns:
+                metrics.append({"label": "Industry Types", "value": facilities_df['industryName'].nunique()})
+            render_metrics_row(metrics, num_columns=2)
+            render_data_expander("View Facilities Data", facilities_df,
+                display_columns=['facilityName', 'industryCode', 'industryName', 'facility'],
+                download_filename=f"near_facilities_{query_region_code or 'all'}.csv",
+                download_key=f"download_{context.analysis_key}_facilities")
+
+        # Step 2: Samples
         if not samples_df.empty:
-            st.markdown("### 🧪 Step 2: Contaminated Samples")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Samples", len(samples_df))
-            with col2:
-                if 'sp' in samples_df.columns:
-                    st.metric("Unique Sample Points", samples_df['sp'].nunique())
-            with col3:
-                if 'max' in samples_df.columns:
-                    try:
-                        max_vals = pd.to_numeric(samples_df['max'], errors='coerce')
-                        if max_vals.notna().any():
-                            st.metric("Max Concentration", f"{max_vals.max():.2f} ng/L")
-                    except Exception:
-                        pass
-            
-            with st.expander("📊 View Samples Data"):
-                # Clean up unit encoding for display (matches notebook behavior)
-                samples_display_df = samples_df.copy()
-                for col in ("unit", "datedresults", "results"):
-                    if col in samples_display_df.columns:
-                        s = samples_display_df[col]
-                        mask = s.notna()
-                        samples_display_df.loc[mask, col] = (
-                            s.loc[mask].astype(str).str.replace("Î¼", "μ")
-                        )
-                
-                display_cols = [
-                    c for c in ['max', 'resultCount', 'datedresults', 'Materials', 'Type', 'spName', 'sp']
-                    if c in samples_display_df.columns
-                ]
-                if display_cols:
-                    st.dataframe(samples_display_df[display_cols], use_container_width=True)
-                else:
-                    st.dataframe(samples_display_df, use_container_width=True)
-                
-                # Summary statistics
-                if 'max' in samples_display_df.columns:
-                    st.markdown("##### 📈 Concentration Statistics")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Max (ng/L)", f"{samples_display_df['max'].max():.2f}")
-                    with col2:
-                        st.metric("Mean (ng/L)", f"{samples_display_df['max'].mean():.2f}")
-                    with col3:
-                        st.metric("Median (ng/L)", f"{samples_display_df['max'].median():.2f}")
-                
-                csv_samples = samples_df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Samples CSV",
-                    data=csv_samples,
-                    file_name=f"near_facilities_samples_{query_region_code or 'all'}.csv",
-                    mime="text/csv",
-                    key=f"download_{analysis_key}_samples"
-                )
-        
-        # Map section
-        if not facilities_df.empty or not samples_df.empty:
-            if not facilities_df.empty and 'facWKT' in facilities_df.columns:
-                st.markdown("---")
-                st.markdown("### 🗺️ Interactive Map")
-                
-                # Create map
-                # Convert to GeoDataFrames
-                try:
-                    facilities_gdf = facilities_df.copy()
-                    facilities_gdf['geometry'] = facilities_gdf['facWKT'].apply(wkt.loads)
-                    facilities_gdf = gpd.GeoDataFrame(facilities_gdf, geometry='geometry', crs='EPSG:4326')
-                    
-                    # Get center point
-                    center_lat = facilities_gdf.geometry.centroid.y.mean()
-                    center_lon = facilities_gdf.geometry.centroid.x.mean()
-                    
-                    # Create map
-                    map_obj = folium.Map(location=[center_lat, center_lon], zoom_start=8)
+            st.markdown("### Step 2: Contaminated Samples")
+            metrics = [{"label": "Total Samples", "value": len(samples_df)}]
+            if 'sp' in samples_df.columns:
+                metrics.append({"label": "Unique Sample Points", "value": samples_df['sp'].nunique()})
+            if 'max' in samples_df.columns:
+                max_vals = pd.to_numeric(samples_df['max'], errors='coerce')
+                if max_vals.notna().any():
+                    metrics.append({"label": "Max Concentration", "value": f"{max_vals.max():.2f} ng/L"})
+            render_metrics_row(metrics, num_columns=3)
 
-                    # Ensure popups wrap long content instead of overflowing outside the card.
-                    try:
-                        popup_css = """
-<style>
-.leaflet-popup-content { min-width: 420px !important; max-width: 900px !important; width: auto !important; }
-.leaflet-popup-content table { width: 100% !important; table-layout: auto; }
-.leaflet-popup-content td, .leaflet-popup-content th {
-  word-break: normal;
-  overflow-wrap: anywhere;
-  white-space: normal !important;
-}
-/* Ensure long URLs wrap instead of overflowing */
-.leaflet-popup-content a {
-  overflow-wrap: anywhere;
-  white-space: normal !important;
-}
-</style>
-"""
-                        map_obj.get_root().header.add_child(folium.Element(popup_css))
-                    except Exception:
-                        pass
-                    
-                    add_region_boundary_layers(
-                        map_obj,
-                        state_boundary_df=state_boundary_df,
-                        county_boundary_df=county_boundary_df,
-                        region_boundary_df=region_boundary_df,
-                        region_code=query_region_code,
-                    )
-                    
-                    # Add facilities (blue markers) - ensure popup has the full info (same as hover)
-                    if "facility" in facilities_gdf.columns:
-                        facilities_gdf["facility_link"] = facilities_gdf["facility"].apply(
-                            lambda x: (
-                                f'<a href="https://frs-public.epa.gov/ords/frs_public2/fii_query_detail.disp_program_facility?p_registry_id={x.split(".")[-1]}" target="_blank">FRS {x.split(".")[-1]}</a>'
-                                if x
-                                else x
-                            )
-                        )
+            samples_display = clean_unit_encoding(samples_df, columns=['unit', 'datedresults', 'results'])
+            render_data_expander("View Samples Data", samples_display,
+                display_columns=['max', 'resultCount', 'datedresults', 'Materials', 'Type', 'spName', 'sp'],
+                download_filename=f"near_facilities_samples_{query_region_code or 'all'}.csv",
+                download_key=f"download_{context.analysis_key}_samples",
+                show_stats=True, stats_column='max')
 
-                    # Shorten NAICS URI for display (avoids long URLs in the popup)
-                    if "industryCode" in facilities_gdf.columns:
-                        facilities_gdf["industryCode_short"] = facilities_gdf["industryCode"].apply(
-                            lambda x: str(x).split("#")[-1] if x else x
-                        )
+        # Map
+        _render_map(facilities_df, samples_df, industry_display, boundaries, query_region_code, context)
 
-                    facility_popup_fields = [
-                        c
-                        for c in ["facility_link", "facilityName", "industryName", "industryCode_short"]
-                        if c in facilities_gdf.columns
-                    ]
-
-                    facilities_gdf.explore(
-                        m=map_obj,
-                        name=f'<span style="color:Blue;">🏭 {industry_display} ({len(facilities_gdf)})</span>',
-                        color='Blue',
-                        marker_kwds=dict(radius=8),
-                        popup=facility_popup_fields if facility_popup_fields else True,
-                        tooltip=facility_popup_fields if facility_popup_fields else True,
-                        popup_kwds={"max_width": 650, "parse_html": True},
-                        tooltip_kwds={"sticky": True, "parse_html": True},
-                        show=True
-                    )
-                    
-                    # Add samples if available (orange markers)
-                    if not samples_df.empty and 'spWKT' in samples_df.columns:
-                        samples_gdf = samples_df.copy()
-                        samples_gdf['geometry'] = samples_gdf['spWKT'].apply(wkt.loads)
-                        samples_gdf = gpd.GeoDataFrame(samples_gdf, geometry='geometry', crs='EPSG:4326')
-                        
-                        # Keep popups focused: prefer datedresults and avoid redundant results/dates.
-                        # We drop redundant columns from the map layer itself so they can't appear even if
-                        # Folium/GeoPandas falls back to "show all properties".
-                        samples_map_gdf = samples_gdf.drop(
-                            columns=[c for c in ["results", "dates"] if c in samples_gdf.columns],
-                            errors="ignore",
-                        )
-
-                        # Clean up unit encoding (matches notebook behavior)
-                        for col in ("unit", "datedresults", "results"):
-                            if col in samples_map_gdf.columns:
-                                s = samples_map_gdf[col]
-                                mask = s.notna()
-                                samples_map_gdf.loc[mask, col] = (
-                                    s.loc[mask].astype(str).str.replace("Î¼", "μ")
-                                )
-                        sample_popup_fields = [
-                            c
-                            for c in ["resultCount", "max", "datedresults", "Materials", "Type", "spName"]
-                            if c in samples_map_gdf.columns
-                        ]
-                        if not sample_popup_fields and "datedresults" in samples_map_gdf.columns:
-                            sample_popup_fields = ["datedresults"]
-
-                        samples_map_gdf.explore(
-                            m=map_obj,
-                            name=f'<span style="color:DarkOrange;">🧪 Contaminated Samples ({len(samples_map_gdf)})</span>',
-                            color='DarkOrange',
-                            marker_kwds=dict(radius=6),
-                            popup=sample_popup_fields if sample_popup_fields else ["datedresults"],
-                            popup_kwds={'max_height': 450, 'max_width': 450},
-                            show=True
-                        )
-                    
-                    # Add layer control
-                    folium.LayerControl(collapsed=True).add_to(map_obj)
-                    
-                    # Display map
-                    st_folium(map_obj, width=None, height=600, returned_objects=[])
-                    
-                    st.info("""
-                    **🗺️ Map Legend:**
-                    - 📍 **Boundary** = Selected region (black=state, gray=county, red=subdivision)
-                    - 🔵 **Blue markers** = Facilities of selected industry type
-                    - 🟠 **Orange markers** = Contaminated sample points nearby
-                    """)
-                    
-                except Exception as e:
-                    st.error(f"Error creating map: {e}")
-            else:
-                st.warning("No facility location data available for mapping")
-        else:
+        if facilities_df.empty and samples_df.empty:
             st.warning("No results found. Try a different industry type or region.")
     else:
-        st.info("👈 Select parameters in the sidebar and click 'Execute Query' to run the analysis")
+        st.info("Select parameters in the sidebar and click 'Execute Query' to run the analysis")
+
+
+def _render_map(facilities_df, samples_df, industry_display, boundaries, query_region_code, context) -> None:
+    """Render the interactive map."""
+    if facilities_df.empty or 'facWKT' not in facilities_df.columns:
+        if not facilities_df.empty:
+            st.warning("No facility location data available for mapping")
+        return
+
+    st.markdown("---")
+    st.markdown("### Interactive Map")
+
+    try:
+        facilities_gdf = create_geodataframe(facilities_df, 'facWKT')
+        if facilities_gdf is None or facilities_gdf.empty:
+            return
+
+        map_obj = create_base_map(gdf_list=[facilities_gdf], zoom=8)
+        add_boundary_layers(map_obj, boundaries, query_region_code)
+
+        # Add facility links and shorten NAICS codes
+        if "facility" in facilities_gdf.columns:
+            facilities_gdf["facility_link"] = facilities_gdf["facility"].apply(
+                lambda x: f'<a href="https://frs-public.epa.gov/ords/frs_public2/fii_query_detail.disp_program_facility?p_registry_id={x.split(".")[-1]}" target="_blank">FRS {x.split(".")[-1]}</a>' if x else x)
+        if "industryCode" in facilities_gdf.columns:
+            facilities_gdf["industryCode_short"] = facilities_gdf["industryCode"].apply(
+                lambda x: str(x).split("#")[-1] if x else x)
+
+        facility_fields = [c for c in ["facility_link", "facilityName", "industryName", "industryCode_short"] if c in facilities_gdf.columns]
+        add_point_layer(map_obj, facilities_gdf,
+            name=f'<span style="color:Blue;">{industry_display} ({len(facilities_gdf)})</span>',
+            color='Blue', popup_fields=facility_fields, radius=8,
+            popup_kwds={"max_width": 650, "parse_html": True},
+            tooltip_kwds={"sticky": True, "parse_html": True})
+
+        # Add samples
+        if not samples_df.empty and 'spWKT' in samples_df.columns:
+            samples_gdf = create_geodataframe(samples_df, 'spWKT')
+            if samples_gdf is not None and not samples_gdf.empty:
+                samples_gdf = clean_unit_encoding(samples_gdf)
+                samples_gdf = samples_gdf.drop(columns=[c for c in ["results", "dates"] if c in samples_gdf.columns], errors="ignore")
+                sample_fields = [c for c in ["resultCount", "max", "datedresults", "Materials", "Type", "spName"] if c in samples_gdf.columns]
+                add_point_layer(map_obj, samples_gdf,
+                    name=f'<span style="color:DarkOrange;">Contaminated Samples ({len(samples_gdf)})</span>',
+                    color='DarkOrange', popup_fields=sample_fields, radius=6,
+                    popup_kwds={'max_height': 450, 'max_width': 450})
+
+        finalize_map(map_obj)
+        st_folium(map_obj, width=None, height=600, returned_objects=[])
+        render_map_legend([
+            "**Boundary** = Selected region",
+            "**Blue markers** = Facilities of selected industry type",
+            "**Orange markers** = Contaminated sample points nearby"
+        ])
+
+    except Exception as e:
+        st.error(f"Error creating map: {e}")
