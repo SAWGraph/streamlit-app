@@ -19,25 +19,26 @@ from core.sparql import (
     build_facility_values,
     concentration_filter_sparql,
 )
-from core.naics_utils import normalize_naics_codes, build_simple_naics_values
+from core.naics_utils import normalize_naics_codes, build_naics_values_and_hierarchy
 
 
-def _build_industry_filter(naics_code: Optional[str]) -> str:
+def _build_industry_filter(naics_code: Optional[str]) -> tuple[str, str]:
     """
-    Build a NAICS VALUES clause for downstream queries.
+    Build NAICS VALUES clause and hierarchy for downstream queries.
 
-    Behavior:
-      - If no code is provided, return empty string.
-      - If code length > 4, constrain ?industryCode
-      - Otherwise constrain ?industryGroup
+    Supports all NAICS levels:
+      - 2 digits (sector): builds full hierarchy chain
+      - 3 digits (subsector): builds hierarchy to subsector
+      - 4 digits (group): binds ?industryGroup directly
+      - 5-6 digits (industry): binds ?industryCode directly
 
-    This mirrors the original downstream implementation but uses the
-    shared core.naics helpers for consistency.
+    Returns:
+        (industry_values, industry_hierarchy) tuple
     """
     codes = normalize_naics_codes(naics_code)
     if not codes:
-        return ""
-    return build_simple_naics_values(codes[0])
+        return "", ""
+    return build_naics_values_and_hierarchy(codes[0])
 
 
 def execute_downstream_facilities_query(
@@ -45,10 +46,10 @@ def execute_downstream_facilities_query(
     region_code: Optional[str],
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, Any]]:
     """Step 1: Find facilities by NAICS industry type in a region."""
-    industry_filter = _build_industry_filter(naics_code)
+    industry_values, industry_hierarchy = _build_industry_filter(naics_code)
     region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
-    if not industry_filter:
+    if not industry_values:
         return pd.DataFrame(), "Industry type is required for downstream tracing", {"error": "No industry selected"}
 
     query = f"""
@@ -71,7 +72,8 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     ?industryCode a naics:NAICS-IndustryCode;
         fio:subcodeOf ?industryGroup ;
         rdfs:label ?industryName.
-    {industry_filter}
+    {industry_hierarchy}
+    {industry_values}
 }}
 """
     results_json, error, debug_info = post_sparql_with_debug("federation", query)
@@ -90,14 +92,15 @@ def execute_downstream_streams_query(
     if facility_uris is not None and not isinstance(facility_uris, list):
         facility_uris = None
 
-    facility_values = build_facility_values(facility_uris)
-    industry_filter = _build_industry_filter(naics_code)
+    facility_values_clause = build_facility_values(facility_uris)
+    industry_values, industry_hierarchy = _build_industry_filter(naics_code)
     region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
-    if facility_values:
-        industry_filter = ""
+    if facility_values_clause:
+        industry_values = ""
+        industry_hierarchy = ""
         region_filter = ""
-    elif not industry_filter:
+    elif not industry_values:
         return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
 
     query = f"""
@@ -117,7 +120,7 @@ SELECT DISTINCT ?downstream_flowline ?dsflWKT ?fl_type ?streamName
 WHERE {{
     {{SELECT ?s2 WHERE {{
         ?s2 spatial:connectedTo ?facility.
-        {facility_values}
+        {facility_values_clause}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
             spatial:connectedTo ?facCounty.
@@ -125,7 +128,8 @@ WHERE {{
         ?industryCode a naics:NAICS-IndustryCode;
             fio:subcodeOf ?industryGroup ;
             rdfs:label ?industryName.
-        {industry_filter}
+        {industry_hierarchy}
+        {industry_values}
     }}}}
 
     ?s2 kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
@@ -158,15 +162,16 @@ def execute_downstream_samples_query(
     if facility_uris is not None and not isinstance(facility_uris, list):
         facility_uris = None
 
-    facility_values = build_facility_values(facility_uris)
-    industry_filter = _build_industry_filter(naics_code)
+    facility_values_clause = build_facility_values(facility_uris)
+    industry_values, industry_hierarchy = _build_industry_filter(naics_code)
     sample_region_filter = build_ar3_region_filter(region_code, ar3_var="?ar3")
     facility_region_filter = build_county_region_filter(region_code, county_var="?facCounty")
 
-    if facility_values:
-        industry_filter = ""
+    if facility_values_clause:
+        industry_values = ""
+        industry_hierarchy = ""
         facility_region_filter = ""
-    elif not industry_filter:
+    elif not industry_values:
         return pd.DataFrame(), "Industry type is required", {"error": "No industry selected"}
 
     conc_filter = concentration_filter_sparql(min_conc, max_conc, include_nondetects)
@@ -197,7 +202,7 @@ SELECT DISTINCT ?samplePoint ?spWKT ?sample
 WHERE {{
     {{ SELECT DISTINCT ?s2cell WHERE {{
         ?s2origin spatial:connectedTo ?facility.
-        {facility_values}
+        {facility_values_clause}
         ?facility fio:ofIndustry ?industryGroup;
             fio:ofIndustry ?industryCode;
             spatial:connectedTo ?facCounty.
@@ -205,7 +210,8 @@ WHERE {{
         ?industryCode a naics:NAICS-IndustryCode;
             fio:subcodeOf ?industryGroup ;
             rdfs:label ?industryName.
-        {industry_filter}
+        {industry_hierarchy}
+        {industry_values}
 
         ?s2origin kwg-ont:sfTouches|owl:sameAs ?s2neighbor.
         ?s2neighbor rdf:type kwg-ont:S2Cell_Level13;
