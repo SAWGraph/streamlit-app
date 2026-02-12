@@ -6,38 +6,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 import pandas as pd
-import requests
 import streamlit as st
 
-from core.sparql import ENDPOINT_URLS, parse_sparql_results
-
-
-def _execute_sparql_query(
-    query: str,
-) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
-    endpoint = ENDPOINT_URLS["federation"]
-    headers = {
-        "Accept": "application/sparql-results+json",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    debug_info: Dict[str, Any] = {
-        "endpoint": endpoint,
-        "query": query,
-    }
-    try:
-        response = requests.post(
-            endpoint,
-            data={"query": query},
-            headers=headers,
-            timeout=None,
-        )
-        debug_info["response_status"] = response.status_code
-        if response.status_code != 200:
-            return None, f"Error {response.status_code}: {response.text}", debug_info
-        return response.json(), None, debug_info
-    except Exception as exc:
-        debug_info["exception"] = str(exc)
-        return None, f"Error: {str(exc)}", debug_info
+from core.sparql import ENDPOINT_URLS, parse_sparql_results, post_sparql_with_debug
 
 
 def get_sockg_state_codes() -> pd.DataFrame:
@@ -67,7 +38,7 @@ SELECT DISTINCT ?ar1 WHERE {
     FILTER(STRSTARTS(STR(?ar1), "http://stko-kwg.geog.ucsb.edu")).
 }
 """
-    results, _, _ = _execute_sparql_query(query)
+    results, _, _ = post_sparql_with_debug("federation", query)
     df = parse_sparql_results(results) if results else pd.DataFrame()
     if df.empty:
         return pd.DataFrame(columns=["ar1", "fips_code"])
@@ -112,7 +83,7 @@ WHERE {{
     {state_filter}
 }}
 """
-    results, error, debug_info = _execute_sparql_query(query)
+    results, error, debug_info = post_sparql_with_debug("federation", query)
     df = parse_sparql_results(results) if results else pd.DataFrame()
     debug_info.update({
         "label": "Step 1: SOCKG Locations",
@@ -186,7 +157,7 @@ WHERE {{
 }}
 GROUP BY ?facility ?facilityName ?facWKT ?PFASusing ?industrySector ?industrySubsector
 """
-    results, error, debug_info = _execute_sparql_query(query)
+    results, error, debug_info = post_sparql_with_debug("federation", query)
     df = parse_sparql_results(results) if results else pd.DataFrame()
     debug_info.update({
         "label": "Step 2: SOCKG Nearby Facilities",

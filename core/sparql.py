@@ -227,6 +227,118 @@ def convert_s2_list_to_query_string(s2_list: list[str]) -> str:
     return " ".join(formatted)
 
 
+def state_code_from_region(region_code: Optional[str]) -> Optional[str]:
+    """
+    Extract the 2-digit state code from a region code.
+
+    Args:
+        region_code: FIPS region code (state or county).
+            - 2-digit: returned as-is (state code)
+            - 5-digit: first 2 digits returned (state from county)
+            - Other: None
+
+    Returns:
+        2-digit state code or None if not extractable.
+    """
+    if not region_code:
+        return None
+    code = str(region_code).strip()
+    if not code:
+        return None
+    if len(code) == 5:
+        return code[:2]
+    if len(code) <= 2:
+        return code
+    return None
+
+
+def build_county_region_filter(
+    region_code: Optional[str],
+    county_var: str = "?county",
+) -> str:
+    """
+    Build a SPARQL pattern to filter by county within a state.
+
+    Used when filtering facilities by the county they're connected to.
+
+    Args:
+        region_code: 2-digit state FIPS code (e.g. "23" for Maine).
+        county_var: SPARQL variable name for the county (default: ?county).
+
+    Returns:
+        SPARQL fragment or empty string if no valid code.
+    """
+    if not region_code:
+        return ""
+    code = str(region_code).strip()
+    if len(code) <= 5:
+        return f"""{county_var} rdf:type kwg-ont:AdministrativeRegion_2 ;
+               kwg-ont:administrativePartOf kwgr:administrativeRegion.USA.{code} ."""
+    return ""
+
+
+def build_ar3_region_filter(
+    region_code: Optional[str],
+    ar3_var: str = "?ar3",
+) -> str:
+    """
+    Build a SPARQL pattern to filter by AR3 administrative regions.
+
+    AR3 regions are finer-grained administrative units (e.g. subdivisions).
+
+    Args:
+        region_code: FIPS region code.
+            - >5 digits: binds ar3_var to exact geoId URI
+            - <=5 digits: uses administrativePartOf+ to find AR3s within region
+        ar3_var: SPARQL variable name for the AR3 region (default: ?ar3).
+
+    Returns:
+        SPARQL fragment or empty string if no valid code.
+    """
+    if not region_code:
+        return ""
+    code = str(region_code).strip()
+    if not code:
+        return ""
+    if len(code) > 5:
+        return f"VALUES {ar3_var} {{ <https://datacommons.org/browser/geoId/{code}> }} ."
+    return (
+        f"{ar3_var} rdf:type kwg-ont:AdministrativeRegion_3 ; "
+        f"kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
+    )
+
+
+def build_facility_values(facility_uris: Optional[list[str]]) -> str:
+    """
+    Build a SPARQL VALUES clause for a list of facility URIs.
+
+    Handles various URI formats (bare URIs, angle-bracketed, http/https).
+
+    Args:
+        facility_uris: List of facility URI strings.
+
+    Returns:
+        SPARQL VALUES clause like "VALUES ?facility { <uri1> <uri2> }."
+        or empty string if no valid URIs.
+    """
+    if not facility_uris:
+        return ""
+    cleaned: list[str] = []
+    for uri in facility_uris:
+        if not uri:
+            continue
+        u = str(uri).strip()
+        if not u:
+            continue
+        if u.startswith("<") and u.endswith(">"):
+            cleaned.append(u)
+        elif u.startswith("http://") or u.startswith("https://"):
+            cleaned.append(f"<{u}>")
+    if not cleaned:
+        return ""
+    return f"VALUES ?facility {{ {' '.join(cleaned)} }}."
+
+
 # =============================================================================
 # QUERY EXECUTION FUNCTIONS
 # =============================================================================

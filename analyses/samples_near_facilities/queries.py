@@ -9,17 +9,18 @@ data from multiple knowledge graphs in one query.
 from __future__ import annotations
 
 import pandas as pd
-import requests
 from typing import Any, Dict, Optional, Tuple
 
-from core.sparql import ENDPOINT_URLS, parse_sparql_results
+from core.sparql import (
+    ENDPOINT_URLS,
+    parse_sparql_results,
+    post_sparql_with_debug,
+    concentration_filter_sparql,
+)
 from core.naics_utils import normalize_naics_codes, build_naics_values_and_hierarchy
 
 # Alias for backward compatibility
 ENDPOINTS = ENDPOINT_URLS
-
-
-# parse_sparql_results is imported from core.sparql
 
 
 def _normalize_samples_df(samples_df: pd.DataFrame) -> pd.DataFrame:
@@ -45,38 +46,6 @@ def _normalize_samples_df(samples_df: pd.DataFrame) -> pd.DataFrame:
             samples_df[col] = pd.to_numeric(samples_df[col], errors="coerce")
 
     return samples_df
-
-
-def execute_sparql_query(
-    endpoint: str,
-    query: str,
-    method: str = 'POST',
-) -> Tuple[Optional[dict], Optional[str], Dict[str, Any]]:
-    """Execute a SPARQL query and return JSON results with debug info."""
-    headers = {
-        'Accept': 'application/sparql-results+json',
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    debug_info: Dict[str, Any] = {
-        "endpoint": endpoint,
-        "method": method.upper(),
-        "query": query,
-    }
-
-    try:
-        if method.upper() == 'POST':
-            response = requests.post(endpoint, data={'query': query}, headers=headers, timeout=None)
-        else:
-            response = requests.get(endpoint, params={'query': query}, headers=headers, timeout=None)
-
-        debug_info["response_status"] = response.status_code
-        if response.status_code != 200:
-            return None, f"Error {response.status_code}: {response.text}", debug_info
-
-        return response.json(), None, debug_info
-    except Exception as e:
-        debug_info["exception"] = str(e)
-        return None, f"Error: {str(e)}", debug_info
 
 
 def execute_nearby_analysis(
@@ -112,7 +81,7 @@ def execute_nearby_analysis(
     print(f"Concentration range: {min_concentration}-{max_concentration} ng/L")
     print(f"Include nondetects: {include_nondetects}")
     print(f"{'='*60}\n")
-    
+
     # Build industry filter using VALUES clause (notebook style)
     if naics_codes:
         industry_values, industry_hierarchy = build_naics_values_and_hierarchy(
@@ -120,7 +89,7 @@ def execute_nearby_analysis(
         )
     else:
         industry_values, industry_hierarchy = "", ""
-    
+
     # Build region filter (optional).
     # IMPORTANT: filter on the facility-connected county (not S2 cells), so state + county behave correctly.
     # - state (2 digits): keep counties within the selected state
@@ -140,7 +109,7 @@ def execute_nearby_analysis(
         else:
             # Subdivision / other codes not currently supported for this analysis
             region_filter = ""
-    
+
     # =========================================================================
     # QUERY 1: Get facilities (matches notebook q2)
     # =========================================================================
@@ -169,10 +138,10 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     {industry_values}
 }}
 """
-    
+
     print("--- Query 1: Fetching facilities ---")
-    facilities_result, facilities_error, facilities_debug = execute_sparql_query(
-        ENDPOINTS['federation'], facilities_query
+    facilities_result, facilities_error, facilities_debug = post_sparql_with_debug(
+        "federation", facilities_query
     )
     facilities_df = parse_sparql_results(facilities_result) if facilities_result else pd.DataFrame()
     facilities_debug.update({
@@ -180,24 +149,22 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
         "error": facilities_error,
         "row_count": len(facilities_df),
     })
-    
+
     if not facilities_df.empty:
         print(f"   > Found {len(facilities_df)} facilities")
     else:
         print("   > No facilities found")
-    
+
     # =========================================================================
     # QUERY 2: Get samples near facilities (matches notebook q5)
     # Uses subquery for S2 neighbors exactly as in notebook
     # =========================================================================
-    
+
     # Build concentration filter.
     # NOTE: Nondetect handling is expensive in the federated query; when include_nondetects=False
     # we omit the non-detect machinery entirely for performance.
     if include_nondetects:
-        concentration_filter = (
-            f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_concentration} && ?numericValue <= {max_concentration}) )"
-        )
+        concentration_filter = concentration_filter_sparql(min_concentration, max_concentration, True)
         nondetect_fragment = """
     OPTIONAL { ?result qudt:enumeratedValue ?enumDetected }
     # Non-detect detection: enumeratedValue OR explicit "non-detect" value (string/URI)
@@ -226,7 +193,7 @@ SELECT DISTINCT ?facility ?facWKT ?facilityName ?industryCode ?industryName WHER
     # Detected-only fast path: numericValue derived from numericResult/result_value, no non-detect handling
     BIND(COALESCE(xsd:decimal(?numericResult), xsd:decimal(?result_value)) as ?numericValue)
 """
-    
+
     samples_query = f"""
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -292,13 +259,13 @@ WHERE {{
 }} GROUP BY ?sp ?spName ?spWKT
 ORDER BY DESC(?max)
 """
-    
+
     print("--- Query 2: Fetching samples near facilities ---")
-    samples_result, samples_error, samples_debug = execute_sparql_query(
-        ENDPOINTS['federation'], samples_query
+    samples_result, samples_error, samples_debug = post_sparql_with_debug(
+        "federation", samples_query
     )
     samples_df = parse_sparql_results(samples_result) if samples_result else pd.DataFrame()
-    
+
     if not samples_df.empty:
         print(f"   > Found {len(samples_df)} sample points")
         samples_df = _normalize_samples_df(samples_df)
@@ -311,11 +278,11 @@ ORDER BY DESC(?max)
     })
 
     debug_info: Dict[str, Any] = {"queries": [facilities_debug, samples_debug]}
-    
+
     print(f"\n{'='*60}")
     print(f"ANALYSIS COMPLETE")
     print(f"  - Facilities: {len(facilities_df)}")
     print(f"  - Sample points nearby: {len(samples_df)}")
     print(f"{'='*60}\n")
-    
+
     return facilities_df, samples_df, debug_info
