@@ -9,11 +9,7 @@ import pandas as pd
 from streamlit_folium import st_folium
 
 from analysis_registry import AnalysisContext
-from analyses.pfas_upstream.queries import (
-    execute_sparql_query,
-    execute_hydrology_query,
-    execute_facility_query,
-)
+from analyses.pfas_upstream.queries import run_upstream
 from filters.substance import get_available_substances_with_labels
 from filters.material import get_available_material_types_with_labels
 from filters.concentration import render_concentration_filter, apply_concentration_filter
@@ -31,37 +27,6 @@ from components.execute_button import render_execute_button
 from components.analysis_state import AnalysisState, check_old_session_keys
 from components.step_execution import StepExecutor
 from components.query_debug import render_executed_queries
-
-
-def _append_debug_queries(executed_queries: list[dict], debug_info: dict, default_label: str) -> None:
-    """Normalize debug payloads into a flat list for rendering."""
-    if not debug_info:
-        return
-
-    nested = debug_info.get("queries")
-    if isinstance(nested, list) and nested:
-        for idx, query_item in enumerate(nested, start=1):
-            query_item = query_item or {}
-            executed_queries.append({
-                "label": query_item.get("label") or f"{default_label} ({idx})",
-                "endpoint": query_item.get("endpoint") or debug_info.get("endpoint"),
-                "timeout_sec": query_item.get("timeout_sec") or debug_info.get("timeout_sec"),
-                "response_status": query_item.get("response_status"),
-                "row_count": query_item.get("row_count"),
-                "error": query_item.get("error") or query_item.get("exception"),
-                "query": query_item.get("query"),
-            })
-        return
-
-    executed_queries.append({
-        "label": default_label,
-        "endpoint": debug_info.get("endpoint"),
-        "timeout_sec": debug_info.get("timeout_sec"),
-        "response_status": debug_info.get("response_status"),
-        "row_count": debug_info.get("row_count"),
-        "error": debug_info.get("error") or debug_info.get("exception"),
-        "query": debug_info.get("query"),
-    })
 
 
 def main(context: AnalysisContext) -> None:
@@ -175,65 +140,49 @@ def main(context: AnalysisContext) -> None:
             st.markdown("---")
             st.subheader("Query Execution")
 
+            boundaries = fetch_boundaries(context.selected_state_code, context.selected_county_code)
             executor = StepExecutor(num_steps=3)
             samples_df = pd.DataFrame()
             upstream_s2_df = pd.DataFrame()
             upstream_flowlines_df = pd.DataFrame()
             facilities_df = pd.DataFrame()
-            boundaries = {}
             executed_queries = []
 
-            # Step 1: Find samples
-            with executor.step(1, "Finding contaminated samples...") as step:
-                effective_min = 0 if include_nondetects else min_conc
-                samples_df, error, debug = execute_sparql_query(
-                    selected_substance_uri, selected_material_uri,
-                    effective_min, max_conc, context.region_code,
+            with st.spinner("Running upstream tracing (3 federation queries)..."):
+                (
+                    samples_df,
+                    upstream_s2_df,
+                    upstream_flowlines_df,
+                    facilities_df,
+                    executed_queries,
+                    err,
+                ) = run_upstream(
+                    selected_substance_uri,
+                    selected_material_uri,
+                    min_conc,
+                    max_conc,
+                    context.region_code,
                     include_nondetects=include_nondetects,
                 )
-                _append_debug_queries(executed_queries, debug, "Step 1: Contaminated Samples")
-                samples_df = samples_df if samples_df is not None else pd.DataFrame()
-                boundaries = fetch_boundaries(context.selected_state_code, context.selected_county_code)
 
-                if error:
-                    step.error(f"Step 1 failed: {error}")
-                elif not samples_df.empty:
-                    step.success(f"Step 1: Found {len(samples_df)} contaminated samples")
+            with executor.step(1, "Step 1") as step:
+                if not samples_df.empty:
+                    step.success(f"Found {len(samples_df)} contaminated samples")
                 else:
-                    step.warning("Step 1: No contaminated samples found")
-
-            # Step 2: Trace upstream
-            with executor.step(2, "Tracing upstream flow paths...") as step:
-                if samples_df.empty:
-                    step.info("Step 2: Skipped (no samples)")
+                    step.warning("No contaminated samples found")
+            with executor.step(2, "Step 2") as step:
+                n_fl = len(upstream_flowlines_df)
+                if n_fl:
+                    step.success(f"Traced {n_fl} upstream flowlines")
                 else:
-                    upstream_s2_df, upstream_flowlines_df, error, debug = execute_hydrology_query(samples_df)
-                    _append_debug_queries(executed_queries, debug, "Step 2: Upstream Hydrology")
-                    upstream_s2_df = upstream_s2_df if upstream_s2_df is not None else pd.DataFrame()
-                    upstream_flowlines_df = upstream_flowlines_df if upstream_flowlines_df is not None else pd.DataFrame()
-
-                    if error:
-                        step.error(f"Step 2 failed: {error}")
-                    elif not upstream_s2_df.empty:
-                        step.success(f"Step 2: Traced {len(upstream_s2_df)} upstream paths")
-                    else:
-                        step.info("Step 2: No upstream sources found")
-
-            # Step 3: Find facilities
-            with executor.step(3, "Finding upstream facilities...") as step:
-                if upstream_s2_df.empty:
-                    step.info("Step 3: Skipped (no upstream cells)")
+                    step.info("No upstream flow paths found")
+            with executor.step(3, "Step 3") as step:
+                if not facilities_df.empty:
+                    step.success(f"Found {len(facilities_df)} facilities")
                 else:
-                    facilities_df, error, debug = execute_facility_query(upstream_s2_df)
-                    _append_debug_queries(executed_queries, debug, "Step 3: Upstream Facilities")
-                    facilities_df = facilities_df if facilities_df is not None else pd.DataFrame()
-
-                    if error:
-                        step.error(f"Step 3 failed: {error}")
-                    elif not facilities_df.empty:
-                        step.success(f"Step 3: Found {len(facilities_df)} facilities")
-                    else:
-                        step.info("Step 3: No facilities found")
+                    step.info("No facilities found")
+            if err:
+                st.error(err)
 
             state.set('executed_queries', executed_queries)
             # Store results
@@ -282,10 +231,11 @@ def main(context: AnalysisContext) -> None:
                 download_filename=f"contaminated_samples_{query_region_code}.csv",
                 download_key=f"download_{context.analysis_key}_samples")
 
-        # Step 2 Results
-        if not upstream_s2_df.empty:
+        # Step 2 Results (notebook-style returns flowlines only; default returns upstream_s2_df)
+        if not upstream_s2_df.empty or not upstream_flowlines_df.empty:
             st.markdown("### Step 2: Upstream Flow Paths")
-            st.metric("Total Upstream Connections", len(upstream_s2_df))
+            step2_count = len(upstream_s2_df) if not upstream_s2_df.empty else len(upstream_flowlines_df)
+            st.metric("Total Upstream Connections", step2_count)
 
         # Step 3 Results
         if not facilities_df.empty:
@@ -365,7 +315,7 @@ def _render_map(samples_df, facilities_df, upstream_s2_df, upstream_flowlines_df
                        'DodgerBlue', weight=2, opacity=0.5)
 
     if samples_gdf is not None and not samples_gdf.empty:
-        fields = [c for c in ["sp", "result_value", "substance", "matType"] if c in samples_gdf.columns]
+        fields = [c for c in ["sp", "result_value", "substance", "matType", "regionURI"] if c in samples_gdf.columns]
         add_point_layer(map_obj, samples_gdf, '<span style="color:DarkOrange;">Contaminated Samples</span>',
                         'DarkOrange', popup_fields=fields, radius=8)
 

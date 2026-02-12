@@ -5,7 +5,7 @@ This is the single source of truth for SPARQL utilities.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 import pandas as pd
 import rdflib
 import requests
@@ -123,6 +123,78 @@ def convertToDataframe(_results) -> pd.DataFrame:
 # QUERY BUILDING HELPERS
 # =============================================================================
 
+def sparql_values_uri(var_name: str, uri: Optional[str]) -> str:
+    """
+    Build a SPARQL VALUES clause for a single URI variable (e.g. ?substance, ?matType).
+
+    Args:
+        var_name: Variable name without '?' (e.g. 'substance', 'matType').
+        uri: Full URI string; if None or empty, returns empty string.
+
+    Returns:
+        "VALUES ?varName { <uri> }" or "".
+    """
+    if not uri or not uri.strip():
+        return ""
+    u = uri.strip()
+    if u.startswith("<") and u.endswith(">"):
+        return f"VALUES ?{var_name} {{ {u} }}"
+    return f"VALUES ?{var_name} {{ <{u}> }}"
+
+
+def region_pattern_sparql(region_code: str) -> str:
+    """
+    Build the SPARQL graph pattern for filtering by US state or county.
+
+    Uses ?regionURI. For long codes (e.g. FIPS county), binds single region URI.
+    For short codes (state), uses type and administrativePartOf+.
+
+    Args:
+        region_code: State FIPS (e.g. '23') or full FIPS (e.g. state+county).
+
+    Returns:
+        SPARQL fragment to inject into WHERE (no outer braces).
+    """
+    code = (region_code or "").strip()
+    if not code:
+        return ""
+    if len(code) > 5:
+        return f"VALUES ?regionURI {{ <https://datacommons.org/browser/geoId/{code}> }}"
+    return (
+        f"?regionURI rdf:type kwg-ont:AdministrativeRegion_3 ; "
+        f"kwg-ont:administrativePartOf+ kwgr:administrativeRegion.USA.{code} ."
+    )
+
+
+def concentration_filter_sparql(
+    min_conc: float,
+    max_conc: float,
+    include_nondetects: bool,
+) -> str:
+    """
+    Build SPARQL FILTER clauses for concentration (assumes ?numericValue and ?isNonDetect).
+
+    Args:
+        min_conc: Minimum concentration (inclusive).
+        max_conc: Maximum concentration (inclusive).
+        include_nondetects: If True, allow non-detects and filter numeric range.
+
+    Returns:
+        Newline-joined FILTER lines.
+    """
+    if include_nondetects:
+        return (
+            f"FILTER( ?isNonDetect || (BOUND(?numericValue) && ?numericValue >= {min_conc} && ?numericValue <= {max_conc}) )"
+        )
+    return "\n".join([
+        "FILTER(!?isNonDetect)",
+        "FILTER(BOUND(?numericValue))",
+        "FILTER(?numericValue > 0)",
+        f"FILTER (?numericValue >= {min_conc})",
+        f"FILTER (?numericValue <= {max_conc})",
+    ])
+
+
 def convert_s2_list_to_query_string(s2_list: list[str]) -> str:
     """
     Convert S2 cell URIs to SPARQL VALUES clause format.
@@ -158,6 +230,51 @@ def convert_s2_list_to_query_string(s2_list: list[str]) -> str:
 # =============================================================================
 # QUERY EXECUTION FUNCTIONS
 # =============================================================================
+
+def post_sparql_with_debug(
+    endpoint_key: str,
+    query: str,
+    timeout: Optional[int] = None,
+) -> tuple[Optional[dict], Optional[str], dict]:
+    """
+    POST a SPARQL query to a known endpoint and return (json, error, debug_info).
+
+    Args:
+        endpoint_key: Key from ENDPOINT_URLS (e.g. 'federation').
+        query: SPARQL query string.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        (json_response, error_message, debug_dict). debug_dict has endpoint, query,
+        response_status, and optionally exception.
+    """
+    if endpoint_key not in ENDPOINT_URLS:
+        return None, f"Unknown endpoint: {endpoint_key}", {"endpoint": None, "query": query}
+    endpoint = ENDPOINT_URLS[endpoint_key]
+    headers = {
+        "Accept": "application/sparql-results+json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    debug: dict[str, Any] = {"endpoint": endpoint, "query": query}
+    try:
+        response = requests.post(
+            endpoint, data={"query": query}, headers=headers, timeout=timeout
+        )
+        debug["response_status"] = response.status_code
+        if response.status_code != 200:
+            return (
+                None,
+                f"Error {response.status_code}: {response.text[:500]}",
+                debug,
+            )
+        return response.json(), None, debug
+    except requests.exceptions.RequestException as e:
+        debug["exception"] = str(e)
+        return None, f"Network error: {str(e)}", debug
+    except Exception as e:
+        debug["exception"] = str(e)
+        return None, f"Error: {str(e)}", debug
+
 
 def execute_sparql_query(
     endpoint: str,
