@@ -106,13 +106,17 @@ def main(context: AnalysisContext) -> None:
             else:
                 step.info("Step 1: No SOCKG locations found")
 
-        with executor.step(2, "Finding nearby facilities...") as step:
-            facilities_df, facilities_debug = get_sockg_facilities(state_code)
-            executed_queries.append(facilities_debug)
-            if not facilities_df.empty:
-                step.success(f"Step 2: Found {len(facilities_df)} facilities")
-            else:
-                step.info("Step 2: No facilities found")
+        if sites_df.empty:
+            st.warning("No SOCKG locations found — skipping nearby facilities query.")
+            facilities_df = pd.DataFrame()
+        else:
+            with executor.step(2, "Finding nearby facilities...") as step:
+                facilities_df, facilities_debug = get_sockg_facilities(state_code)
+                executed_queries.append(facilities_debug)
+                if not facilities_df.empty:
+                    step.success(f"Step 2: Found {len(facilities_df)} facilities")
+                else:
+                    step.info("Step 2: No facilities found")
 
         record_executed_query_batch(
             request=run_request,

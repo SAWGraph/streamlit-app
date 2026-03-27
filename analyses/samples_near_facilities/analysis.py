@@ -159,27 +159,31 @@ def main(context: AnalysisContext) -> None:
             else:
                 step.warning("Step 1: No facilities found")
 
-        with executor.step(2, "Finding PFAS samples...") as step:
-            samples_df, error, debug = execute_nearby_samples_query(
-                naics_code=selected_naics_code,
-                region_code=context.region_code,
-                min_concentration=min_conc,
-                max_concentration=max_conc,
-                include_nondetects=include_nondetects,
-            )
-            step_info = build_query_debug_entry(
-                "Step 2: Nearby Samples",
-                debug,
-                row_count=len(samples_df),
-                error=error,
-            )
-            _record_step(step_info)
-            if error:
-                step.error(f"Step 2 failed: {error}")
-            elif not samples_df.empty:
-                step.success(f"Step 2: Found {len(samples_df)} PFAS samples")
-            else:
-                step.info("Step 2: No PFAS samples found")
+        if facilities_df.empty:
+            st.warning("No facilities found — skipping nearby samples query.")
+            samples_df = pd.DataFrame()
+        else:
+            with executor.step(2, "Finding PFAS samples...") as step:
+                samples_df, error, debug = execute_nearby_samples_query(
+                    naics_code=selected_naics_code,
+                    region_code=context.region_code,
+                    min_concentration=min_conc,
+                    max_concentration=max_conc,
+                    include_nondetects=include_nondetects,
+                )
+                step_info = build_query_debug_entry(
+                    "Step 2: Nearby Samples",
+                    debug,
+                    row_count=len(samples_df),
+                    error=error,
+                )
+                _record_step(step_info)
+                if error:
+                    step.error(f"Step 2 failed: {error}")
+                elif not samples_df.empty:
+                    step.success(f"Step 2: Found {len(samples_df)} PFAS samples")
+                else:
+                    step.info("Step 2: No PFAS samples found")
 
         # Aggregate raw samples for map popups
         # Use lightweight popups above 20K observations to keep the map responsive

@@ -168,41 +168,44 @@ def main(context: AnalysisContext) -> None:
                 else:
                     step.warning("Step 1: No facilities found")
 
-            with executor.step(2, "Tracing downstream streams...") as step:
-                streams_df, error, debug = execute_downstream_streams_query(
-                    naics_code=selected_naics_code, region_code=context.region_code)
-                step_info = build_query_debug_entry(
-                    "Step 2: Downstream Streams",
-                    debug,
-                    row_count=len(streams_df) if streams_df is not None else 0,
-                    error=error,
-                )
-                _record_step(step_info)
-                if error:
-                    step.error(f"Step 2 failed: {error}")
-                elif not streams_df.empty:
-                    stream_count = streams_df["streamName"].dropna().nunique() if "streamName" in streams_df.columns else 0
-                    step.success(f"Step 2: Found {len(streams_df)} flowlines ({stream_count} named streams)")
-                else:
-                    step.info("Step 2: No downstream flow paths found")
+            if facilities_df.empty:
+                st.warning("No facilities found — skipping downstream stream and sample queries.")
+            else:
+                with executor.step(2, "Tracing downstream streams...") as step:
+                    streams_df, error, debug = execute_downstream_streams_query(
+                        naics_code=selected_naics_code, region_code=context.region_code)
+                    step_info = build_query_debug_entry(
+                        "Step 2: Downstream Streams",
+                        debug,
+                        row_count=len(streams_df) if streams_df is not None else 0,
+                        error=error,
+                    )
+                    _record_step(step_info)
+                    if error:
+                        step.error(f"Step 2 failed: {error}")
+                    elif not streams_df.empty:
+                        stream_count = streams_df["streamName"].dropna().nunique() if "streamName" in streams_df.columns else 0
+                        step.success(f"Step 2: Found {len(streams_df)} flowlines ({stream_count} named streams)")
+                    else:
+                        step.info("Step 2: No downstream flow paths found")
 
-            with executor.step(3, "Finding downstream samples...") as step:
-                samples_df, error, debug = execute_downstream_samples_query(
-                    naics_code=selected_naics_code, region_code=context.region_code,
-                    min_conc=min_conc, max_conc=max_conc, include_nondetects=include_nondetects)
-                step_info = build_query_debug_entry(
-                    "Step 3: Downstream Samples",
-                    debug,
-                    row_count=len(samples_df) if samples_df is not None else 0,
-                    error=error,
-                )
-                _record_step(step_info)
-                if error:
-                    step.error(f"Step 3 failed: {error}")
-                elif not samples_df.empty:
-                    step.success(f"Step 3: Found {len(samples_df)} downstream samples")
-                else:
-                    step.info("Step 3: No downstream samples found")
+                with executor.step(3, "Finding downstream samples...") as step:
+                    samples_df, error, debug = execute_downstream_samples_query(
+                        naics_code=selected_naics_code, region_code=context.region_code,
+                        min_conc=min_conc, max_conc=max_conc, include_nondetects=include_nondetects)
+                    step_info = build_query_debug_entry(
+                        "Step 3: Downstream Samples",
+                        debug,
+                        row_count=len(samples_df) if samples_df is not None else 0,
+                        error=error,
+                    )
+                    _record_step(step_info)
+                    if error:
+                        step.error(f"Step 3 failed: {error}")
+                    elif not samples_df.empty:
+                        step.success(f"Step 3: Found {len(samples_df)} downstream samples")
+                    else:
+                        step.info("Step 3: No downstream samples found")
 
             # Aggregate raw samples for map popups
             _LITE_THRESHOLD = 20_000
